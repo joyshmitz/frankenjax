@@ -116,6 +116,20 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (completeness): i64/i32 MIDDLE-axis argmax/argmin — exact-i64 contiguous sub-block, threaded (TealMarten)
+
+Closed the last argmax coverage gap. i64/i32 argmax/argmin along a MIDDLE axis (0<axis<last) used the
+strided per-line serial scan; f64/f32 use `arg_extreme_middle_axis` (contiguous block, threaded) but that
+WIDENS to f64 — lossy for |i64| > 2^53 (would misrank near-i64::MAX). Added `arg_extreme_middle_axis_i64`:
+the EXACT-integer sibling — `before` contiguous [axis_dim, inner] sub-blocks, each an exact-i64 leading-axis
+arg-extreme (`arg_extreme_i64_axis0_block`, no widen), threaded over sub-blocks. Bit-identical to the strided
+scan (row-0 init, strict >/<, first-wins ties); new `i64_middle_axis_argmax_exact_matches_strided` uses
+values near i64::MAX (differ only in low bits) to prove the exact compare — an f64-widen path would collide.
+Structural win (contiguous + threaded vs strided serial), same class as the bf16 argmax 12.1x. full fj-lax
+lib 1738/0. argmax/argmin is now COMPLETE across axes AND dtypes (f64/f32/bf16/f16 threaded, i64/i32 exact
+last/leading/middle). The coverage-gap vein (proven fast path is dtype/axis-gated) is now comprehensively
+mined across pooling / cumulative / argmax.
+
 ## 2026-07-03 - WIRED WIN (12.1x; 13.4x JAX LOSS -> parity): threaded bf16/f16 argmax (was SERIAL for all axes) (TealMarten)
 
 Different primitive (argmax). bf16/f16 argmax used a SERIAL per-slice scan for ALL axes — including the

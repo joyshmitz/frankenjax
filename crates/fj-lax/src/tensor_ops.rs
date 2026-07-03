@@ -9135,6 +9135,70 @@ fn parallel_arg_extreme_i64_axis0(
     out
 }
 
+/// Middle-axis (0 < axis < last) i64/i32 argmin/argmax — the EXACT-integer sibling of
+/// [`arg_extreme_middle_axis`] (which widens to f64, lossy for |i64| > 2^53). The tensor is `before`
+/// contiguous [axis_dim, inner] sub-blocks; each is a leading-axis exact-i64 arg-extreme over its `inner`
+/// columns ([`arg_extreme_i64_axis0_block`], bit-identical to the strided per-line scan), threaded over
+/// sub-blocks. `idx[b*inner + j]` = arg-extreme along the axis for sub-block `b`, column `j`.
+fn arg_extreme_middle_axis_i64(
+    values: &[i64],
+    axis_dim: usize,
+    inner: usize,
+    before: usize,
+    total: usize,
+    find_max: bool,
+) -> Vec<i64> {
+    let mut idx = vec![0i64; before * inner];
+    let block = axis_dim * inner;
+    let threads = (total / (1 << 18))
+        .clamp(1, {
+            std::thread::available_parallelism()
+                .map(|c| c.get())
+                .unwrap_or(8)
+        })
+        .min(before.max(1));
+    if threads <= 1 {
+        for b in 0..before {
+            let s = b * block;
+            arg_extreme_i64_axis0_block(
+                &values[s..s + block],
+                axis_dim,
+                inner,
+                0,
+                find_max,
+                &mut idx[b * inner..b * inner + inner],
+            );
+        }
+        return idx;
+    }
+    let per = before.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [i64] = idx.as_mut_slice();
+        let mut b0 = 0usize;
+        while b0 < before {
+            let cnt = per.min(before - b0);
+            let (chunk, tail) = rest.split_at_mut(cnt * inner);
+            rest = tail;
+            let start = b0;
+            b0 += cnt;
+            scope.spawn(move || {
+                for k in 0..cnt {
+                    let s = (start + k) * block;
+                    arg_extreme_i64_axis0_block(
+                        &values[s..s + block],
+                        axis_dim,
+                        inner,
+                        0,
+                        find_max,
+                        &mut chunk[k * inner..k * inner + inner],
+                    );
+                }
+            });
+        }
+    });
+    idx
+}
+
 fn extremum_along_axis(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -9273,6 +9337,17 @@ fn extremum_along_axis(
             // Leading-axis i64 (argmax over axis 0): stream + thread the independent
             // columns with EXACT integer compare. Bit-identical.
             let idx = parallel_arg_extreme_i64_axis0(values, axis_dim, outer_count, find_max);
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+        // Middle axis (0 < axis < last): contiguous sub-block exact-i64 leading arg-extreme, threaded over
+        // sub-blocks — bit-identical to the strided per-line scan below, but contiguous. (f64/f32 do this
+        // via arg_extreme_middle_axis; i64 needs the EXACT sibling — f64 widen is lossy for |i64| > 2^53.)
+        if axis_stride > 1 && outer_count.is_multiple_of(axis_stride) {
+            let inner = axis_stride;
+            let before = outer_count / inner;
+            let idx = arg_extreme_middle_axis_i64(values, axis_dim, inner, before, total, find_max);
             return Ok(Value::Tensor(
                 TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
             ));
@@ -30486,6 +30561,61 @@ mod tests {
             dense_t * 1e3,
             generic / dense_t
         );
+    }
+
+    #[test]
+    fn i64_middle_axis_argmax_exact_matches_strided() {
+        // 3D [before, axis_dim, inner] i64 argmax/argmin along the MIDDLE axis (axis 1) — the new
+        // contiguous sub-block exact-i64 path vs a strided per-line reference. Values near i64::MAX
+        // (differ only in the low bits) confirm EXACT i64 compare — an f64-widen would collide/misrank.
+        let (before, axis_dim, inner) = (40usize, 200usize, 32usize);
+        let raw: Vec<i64> = (0..before * axis_dim * inner)
+            .map(|i| i64::MAX - ((i as i64).wrapping_mul(2_654_435_761) & 0xFFFF))
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![before as u32, axis_dim as u32, inner as u32],
+                },
+                raw.clone(),
+            )
+            .unwrap(),
+        );
+        let block = axis_dim * inner;
+        for find_max in [true, false] {
+            let prim = if find_max {
+                Primitive::Argmax
+            } else {
+                Primitive::Argmin
+            };
+            let mut p = BTreeMap::new();
+            p.insert("axis".to_owned(), "1".to_owned());
+            let got = match crate::eval_primitive(prim, std::slice::from_ref(&tensor), &p).unwrap()
+            {
+                Value::Tensor(t) => t.elements.as_i64_slice().unwrap().to_vec(),
+                _ => panic!(),
+            };
+            // strided reference: strict >/<, first-wins ties (row 0 init).
+            let mut want = vec![0i64; before * inner];
+            for b in 0..before {
+                for j in 0..inner {
+                    let mut best = raw[b * block + j];
+                    let mut best_k = 0i64;
+                    for k in 1..axis_dim {
+                        let v = raw[b * block + k * inner + j];
+                        if (find_max && v > best) || (!find_max && v < best) {
+                            best = v;
+                            best_k = k as i64;
+                        }
+                    }
+                    want[b * inner + j] = best_k;
+                }
+            }
+            assert_eq!(
+                got, want,
+                "i64 middle-axis argmax(find_max={find_max}) diverges"
+            );
+        }
     }
 
     // ── Squeeze ──
