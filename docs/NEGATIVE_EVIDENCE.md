@@ -306,9 +306,16 @@ The entry below overstated the gap. Verified `separable_reduce_window_sum_f64` I
 4D-only) — gated to window>=25 taps. New bench `eval/sumpool2d_1024x1024_w7s1_valid_f64` (49 taps):
 **fj 2.66ms** — the separable running-sum FIRES for rank-2 large windows and is fast. So rank-2 sum is
 COVERED for large windows; my "rank-2 sum has no separable path" was wrong. ACCURATE gap boundary:
-- **rank-2 MAX, any window: NO separable path** -> generic O(out·win²) (maxpool2d w7 21ms vs JAX 1.28ms
-  = 16.5x). This is the one genuine coverage gap. Fix = a rank-2 separable-max (deque/van-Herk row-then-
-  column, bit-exact since max is order-independent), mirroring the existing 4D-NHWC van-Herk.
+- **rank-2 MAX, any window: naive O(out·win²) SINGLE-THREADED** (`eval_reduce_window_rank2_f64_max_min`,
+  lib.rs; maxpool2d w7 21ms vs JAX 1.28ms = 16.5x). THREADING IT IS NOT THE FIX (2026-07-03, tried +
+  reverted): wrapped the output-row loop in thread::scope (bit-identical, 48 reduce_window tests green),
+  but measured only **21 -> 18.86ms = 1.1x** — `work_scaled_threads(49M)` spawns ~all cores yet the shared
+  swarm host is contention-saturated, so the threaded reduce doesn't scale (the documented
+  "threading-wins-unmeasurable-on-contended-host" caveat; could even regress under load). Reverted per
+  policy (don't ship threading off a single contended-host bench). The REAL fix is ALGORITHMIC: a rank-2
+  separable-max (van-Herk row-then-column, O(input) not O(out·win²), bit-exact since max is
+  order-independent, contention-INDEPENDENT) mirroring the existing 4D-NHWC van-Herk — a ~80-line kernel,
+  filed. Threading only masks; van-Herk removes the 49x redundant work.
 - **small-window SUM (<25 taps): deliberately gated out of separable** (separable overhead > naive fold
   for tiny windows), falls to the generic threaded cell loop = sumpool2d 3x3 17ms vs JAX 0.32ms. The
   generic loop is ~8x slower than it should be for 9 taps (per-cell odometer/interior overhead), but
