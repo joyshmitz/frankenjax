@@ -374,7 +374,11 @@ HONEST A/B (`eval/maxpool2d_1024x1024_w7s1_valid_f64`, dense f64, same binary, e
 real 3x speedup of our code, NOT a JAX win (XLA maxpool is deeply SIMD; still ahead). Bit-identical for
 finite (max/min associative + idempotent; new `van_herk_rank2_maxmin_matches_naive` asserts equality to
 the naive fold for max+min, VALID + same-padding, non-square windows; full fj-lax lib 1728/0 green).
-Applies to f64 only for now (the max/min path is dtype==F64 gated); f32/half still ride the deque.
+FOLLOW-UP (same commit series): extended the hoisted rank-2 van Herk to **f32 + bf16/f16** — widen to
+f64 (the same lossless widen the deque uses), run the f64 van Herk core, narrow back. max/min SELECTS an
+exact input value so the widen/narrow round-trip is bit-identical. f32 (`eval/maxpool2d_1024x1024_w7s1
+_valid_f32`) A/B: deque 21.31ms -> van Herk **7.68ms = 2.77x** (f32 is JAX's DEFAULT CNN dtype, the
+common case). Whole rank-2 float max/min family (f64/f32/bf16/f16) now on the SIMD van Herk.
 
 ## 2026-07-02 - GAP SURFACED: RANK-2 plain-matrix pooling is 16-54x slower than JAX (separable paths cover only 4D NHWC) (TealMarten)
 

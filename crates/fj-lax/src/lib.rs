@@ -8883,14 +8883,19 @@ fn eval_reduce_window(
     // push/pop); van Herk is branchless (2 compares/pass) and SIMD-vectorizes the vertical pass
     // across out_cols — the vectorization the deque cannot express. Finite-gated + bit-identical
     // (idempotent op), so non-finite / small windows fall through to the deque unchanged.
+    // f32/bf16/f16 widen EXACTLY to f64 and max/min SELECTS a widened input value, so the van Herk
+    // f64 core + narrow-back is bit-identical (same widen the deque uses, same idempotent select).
     if no_base_dilation
         && no_window_dilation
-        && tensor.dtype == fj_core::DType::F64
         && rank == 2
         && matches!(reduce_op, "max" | "min")
-        && let Some(src) = tensor.elements.as_f64_slice()
+        && matches!(
+            output_dtype,
+            fj_core::DType::F64 | fj_core::DType::F32 | fj_core::DType::BF16 | fj_core::DType::F16
+        )
+        && let Some(src) = reduce_window_dense_f64_view(tensor)
         && let Some(values) = separable_reduce_window_rank2_maxmin_f64(
-            src,
+            src.as_ref(),
             tensor.shape.dims[0] as usize,
             tensor.shape.dims[1] as usize,
             out_dims[0] as usize,
@@ -8904,15 +8909,33 @@ fn eval_reduce_window(
             reduce_op == "max",
         )
     {
-        return Ok(Value::Tensor(
-            TensorValue::new_f64_values(
-                Shape {
-                    dims: out_dims.clone(),
-                },
-                values,
-            )
-            .map_err(EvalError::from)?,
-        ));
+        let shape = Shape {
+            dims: out_dims.clone(),
+        };
+        return match output_dtype {
+            fj_core::DType::F32 => {
+                let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+                Ok(Value::Tensor(
+                    TensorValue::new_f32_values(shape, f32_values).map_err(EvalError::from)?,
+                ))
+            }
+            fj_core::DType::BF16 | fj_core::DType::F16 => {
+                let bits: Vec<u16> = values
+                    .iter()
+                    .map(|&v| match reduce_window_literal_from_f64(output_dtype, v) {
+                        fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                        _ => 0,
+                    })
+                    .collect();
+                Ok(Value::Tensor(
+                    TensorValue::new_half_float_values(output_dtype, shape, bits)
+                        .map_err(EvalError::from)?,
+                ))
+            }
+            _ => Ok(Value::Tensor(
+                TensorValue::new_f64_values(shape, values).map_err(EvalError::from)?,
+            )),
+        };
     }
 
     // Separable max/min fast path (ANY rank): when ∏window is meaningfully larger than

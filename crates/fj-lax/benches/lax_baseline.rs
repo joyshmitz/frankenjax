@@ -5237,6 +5237,22 @@ fn bench_pool_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/sumpool2d_1024x1024_w7s1_valid_f64", |b| {
         b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_sum7))
     });
+    // f32 maxpool (JAX's DEFAULT CNN dtype) — rank-2 van Herk widens f32->f64, runs the f64 core,
+    // narrows back (bit-identical: max/min selects an exact input value).
+    let m32 = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![1024, 1024],
+            },
+            (0..1024 * 1024)
+                .map(|i| ((i as f32) * 1e-4).sin())
+                .collect(),
+        )
+        .unwrap(),
+    );
+    c.bench_function("eval/maxpool2d_1024x1024_w7s1_valid_f32", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m32), &p_max7))
+    });
     let d = 256usize;
     let cube = Value::Tensor(
         TensorValue::new_f64_values(
