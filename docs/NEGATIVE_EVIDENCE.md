@@ -62,6 +62,19 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - WIN (recorded, HUGE): fj int64 matmul 66-143x FASTER than JAX (JAX has no integer BLAS) (TealMarten)
+
+A NEW win class: INTEGER GEMM. JAX/XLA has NO BLAS for int64, so `a @ b` on int64 runs a naive/slow
+path — JAX 0.10.2 x64: int64 matmul 512 = 336.6ms, 1024 = **3851ms** (int32 IS fast: 0.66/3.3ms — XLA
+vectorizes 32-bit). fj has a blocked i64 GEMM kernel (new benches `eval/int64_matmul_{512,1024}_vsjax`):
+- **int64 matmul 512: fj 5.06ms vs JAX 336.6ms = 66.5x FASTER**
+- **int64 matmul 1024: fj 26.87ms vs JAX 3851ms = 143x FASTER**
+Integer matmul (embeddings/indexing/exact arithmetic) is a clean fj domination — NOT FMA-gated (integer
+= exact, no bit-parity FMA wall), NOT threading-fragile (compute-bound GEMM). Contrasts with FLOAT matmul
+which IS an fj loss (FMA-policy-gated, ~XLA/2). Biggest single-op win recorded alongside top_k-per-row
+(205x). NOTE: int32 matmul is a JAX-fast case (0.66ms) — likely fj parity/loss there (XLA vectorizes
+32-bit), NOT claimed.
+
 ## 2026-07-02 - WIN (recorded): fj threaded threefry uniform 8.5x FASTER than JAX (normal 1.25x, erfinv-bound) (TealMarten)
 
 RNG generation vs JAX 0.10.2 x64 (jaxvenv, 4M f64): JAX threefry on CPU is slow (uniform 60.6ms,

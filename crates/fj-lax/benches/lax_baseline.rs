@@ -1340,6 +1340,36 @@ fn bench_nextafter_1k(c: &mut Criterion) {
     });
 }
 
+// int64 matmul vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02): JAX has NO BLAS for int64, so
+// it runs a naive/slow path — int64 matmul 512 = 336.6ms, 1024 = 3851ms (int32 IS fast
+// in XLA: 0.66/3.3ms). fj has a blocked i64 matmul kernel.
+fn bench_int64_matmul_vs_jax(c: &mut Criterion) {
+    for n in [512usize, 1024] {
+        let a: Vec<i64> = (0..n * n)
+            .map(|i| ((i.wrapping_mul(2654435761) % 199) as i64) - 100)
+            .collect();
+        let b: Vec<i64> = (0..n * n)
+            .map(|i| ((i.wrapping_mul(40503) % 199) as i64) - 100)
+            .collect();
+        let mk = |v: Vec<i64>| {
+            Value::Tensor(
+                TensorValue::new_i64_values(
+                    Shape {
+                        dims: vec![n as u32, n as u32],
+                    },
+                    v,
+                )
+                .unwrap(),
+            )
+        };
+        let (lhs, rhs) = (mk(a), mk(b));
+        let p = no_params();
+        c.bench_function(&format!("eval/int64_matmul_{n}x{n}_vsjax"), |bn| {
+            bn.iter(|| eval_primitive(Primitive::Dot, &[lhs.clone(), rhs.clone()], &p))
+        });
+    }
+}
+
 fn bench_dot_100(c: &mut Criterion) {
     let data: Vec<i64> = (0..100).collect();
     let lhs = Value::vector_i64(&data).unwrap();
@@ -7784,6 +7814,7 @@ criterion_group!(
     bench_lt_broadcast_256_f64_literal_reference,
     bench_nextafter_1k,
     bench_logsumexp_1d_large,
+    bench_int64_matmul_vs_jax,
     bench_dot_100,
     bench_dot_256_matrix_f64,
     bench_eig_48,
