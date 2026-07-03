@@ -7154,6 +7154,113 @@ fn bench_softmax_2d_fused_ab(c: &mut Criterion) {
     });
 }
 
+// DECOMPOSED-vs-FUSED softmax, ML-realistic shape (4096x1024, the transformer
+// logits / attention-row regime). This measures the gap that MATTERS end-to-end:
+// `jax.nn.softmax` decomposes to primitives (reduce_max -> broadcast -> sub -> exp
+// -> reduce_sum -> broadcast -> div), which the interpreter runs one at a time,
+// materializing three full [4096,1024] intermediates in DRAM and re-reading the
+// exp output twice. The fused `softmax_2d` keeps each row L1-resident (read x once,
+// write out once). Neither the max/sum reductions nor the broadcasts nor the final
+// div fuse across the two reductions, so the decomposed arm reflects the real
+// dispatched cost (the eager elementwise fuser only collapses the sub+exp run).
+// Both arms are bit-identical (softmax_2d == rowmap of the 1D softmax == the
+// decomposed reduce/exp/div in index order). Same-invocation A/B.
+fn bench_softmax_decomposed_vs_fused_ab(c: &mut Criterion) {
+    let rows = 4096usize;
+    let cols = 1024usize;
+    let x: Vec<f64> = (0..rows * cols)
+        .map(|k| ((k as f64) * 0.0007).sin() * 4.0)
+        .collect();
+    let elements: Vec<Literal> = x.iter().map(|&v| Literal::from_f64(v)).collect();
+    let input = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![rows as u32, cols as u32],
+        },
+        elements: elements.into(),
+    });
+    let mut reduce_p = BTreeMap::new();
+    reduce_p.insert("axes".to_string(), "1".to_string());
+    let mut bcast_p = BTreeMap::new();
+    bcast_p.insert("shape".to_string(), format!("{rows},{cols}"));
+    bcast_p.insert("broadcast_dimensions".to_string(), "0".to_string());
+
+    c.bench_function("nn/softmax_4096x1024_decomposed_primitives", |bencher| {
+        bencher.iter(|| {
+            let m = eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &reduce_p)
+                .unwrap();
+            let mb =
+                eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&m), &bcast_p)
+                    .unwrap();
+            let shifted =
+                eval_primitive(Primitive::Sub, &[input.clone(), mb], &no_params()).unwrap();
+            let e = eval_primitive(Primitive::Exp, std::slice::from_ref(&shifted), &no_params())
+                .unwrap();
+            let s = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&e), &reduce_p)
+                .unwrap();
+            let sb =
+                eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&s), &bcast_p)
+                    .unwrap();
+            black_box(eval_primitive(Primitive::Div, &[e, sb], &no_params()).unwrap())
+        })
+    });
+
+    c.bench_function("nn/softmax_4096x1024_fused", |bencher| {
+        bencher.iter(|| black_box(fj_lax::nn::softmax_2d(black_box(&x), rows, cols)))
+    });
+
+    // Per-primitive breakdown of the decomposed path (attribute the 34x gap).
+    let maxv =
+        eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &reduce_p).unwrap();
+    let maxb =
+        eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&maxv), &bcast_p).unwrap();
+    let shifted = eval_primitive(Primitive::Sub, &[input.clone(), maxb.clone()], &no_params())
+        .unwrap();
+    let e = eval_primitive(Primitive::Exp, std::slice::from_ref(&shifted), &no_params()).unwrap();
+    let sumv = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&e), &reduce_p).unwrap();
+    let sumb =
+        eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&sumv), &bcast_p).unwrap();
+    c.bench_function("nn/softmax_step_reduce_max", |b| {
+        b.iter(|| {
+            black_box(
+                eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &reduce_p)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("nn/softmax_step_broadcast", |b| {
+        b.iter(|| {
+            black_box(
+                eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&maxv), &bcast_p)
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("nn/softmax_step_sub_bcast", |b| {
+        b.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Sub, &[input.clone(), maxb.clone()], &no_params())
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("nn/softmax_step_exp", |b| {
+        b.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Exp, std::slice::from_ref(&shifted), &no_params())
+                    .unwrap(),
+            )
+        })
+    });
+    c.bench_function("nn/softmax_step_div_bcast", |b| {
+        b.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Div, &[e.clone(), sumb.clone()], &no_params()).unwrap(),
+            )
+        })
+    });
+}
+
 fn bench_logsumexp_1d_large(c: &mut Criterion) {
     let n = 16_000_000usize;
     let x: Vec<f64> = (0..n).map(|k| ((k as f64) * 0.013).sin() * 4.0).collect();
@@ -7173,7 +7280,11 @@ criterion_group!(
     targets = bench_qr_blocked_ab
 );
 
-criterion_group!(softmax_2d_fused_ab, bench_softmax_2d_fused_ab);
+criterion_group!(
+    softmax_2d_fused_ab,
+    bench_softmax_2d_fused_ab,
+    bench_softmax_decomposed_vs_fused_ab
+);
 
 criterion_group!(
     benches,

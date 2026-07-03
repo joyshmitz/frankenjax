@@ -1649,6 +1649,82 @@ fn broadcast_replicate_into<T: Copy + Send + Sync>(
 ) {
     let total = out.len();
     let in_rank = in_dims.len();
+
+    // Trailing REPLICATED axes (no input mapping, or an input dim of 1) fast path.
+    // Across such axes the source offset is CONSTANT, so the innermost `fill_len`
+    // outputs of each outer block are all the SAME source element — a fill, not a
+    // strided copy. This is the reduction-re-expand / broadcast-denominator case
+    // `[n] -> [n, m]` (softmax / log_softmax / layernorm / attention: broadcast the
+    // per-row max or sum back over the reduced axis). The input-mapped block
+    // detection below leaves it at `block_len == 1`, degrading to a per-element
+    // odometer over all `total` outputs (~10x slower than a fill). Bit-identical:
+    // pure replication, same values in the same positions.
+    let mut fill_len = 1_usize;
+    let mut fill_start = out_rank;
+    for a in (0..out_rank).rev() {
+        let replicated = match out_to_in[a] {
+            None => true,
+            Some(in_axis) => in_dims[in_axis] as usize == 1,
+        };
+        if replicated {
+            fill_len = fill_len.saturating_mul(target_dims[a] as usize);
+            fill_start = a;
+        } else {
+            break;
+        }
+    }
+    if fill_len > 1 {
+        let outer_total = total / fill_len;
+        // Source offset for outer block `o`: mixed-radix over the significant axes
+        // [0, fill_start) (axis 0 most significant, row-major), skipping replicated
+        // axes exactly as the copy path's `base_of` does.
+        let base_of = |o: usize| -> usize {
+            let mut rem = o;
+            let mut base = 0_usize;
+            for a in (0..fill_start).rev() {
+                let radix = target_dims[a] as usize;
+                let coord = rem % radix;
+                rem /= radix;
+                if let Some(in_axis) = out_to_in[a]
+                    && in_dims[in_axis] as usize != 1
+                {
+                    base += coord * in_strides[in_axis];
+                }
+            }
+            base
+        };
+        let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && outer_total >= 2 {
+            bw_bound_threads(total).min(outer_total)
+        } else {
+            1
+        };
+        if threads <= 1 {
+            for o in 0..outer_total {
+                out[o * fill_len..o * fill_len + fill_len].fill(src[base_of(o)]);
+            }
+            return;
+        }
+        let outer_per = outer_total.div_ceil(threads);
+        let base_of = &base_of;
+        std::thread::scope(|scope| {
+            let mut rest: &mut [T] = out;
+            let mut o0 = 0usize;
+            while o0 < outer_total {
+                let o1 = (o0 + outer_per).min(outer_total);
+                let len = (o1 - o0) * fill_len;
+                let (blk, tail) = rest.split_at_mut(len);
+                rest = tail;
+                scope.spawn(move || {
+                    for (k, o) in (o0..o1).enumerate() {
+                        blk[k * fill_len..k * fill_len + fill_len].fill(src[base_of(o)]);
+                    }
+                });
+                o0 = o1;
+            }
+        });
+        return;
+    }
+
     // Identical block geometry to `broadcast_replicate`.
     let mut block_len = 1_usize;
     let mut block_start = out_rank;

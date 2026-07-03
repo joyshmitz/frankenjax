@@ -2,6 +2,29 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - WIN: BroadcastInDim replicated-axis FILL fast-path — 2.24x on reduce-then-broadcast (softmax/layernorm/attention) (TealMarten)
+
+Pivoted off FFT to a NON-FFT measured gap: `jax.nn.softmax` in fj decomposes to primitives
+(reduce_max -> broadcast -> sub -> exp -> reduce_sum -> broadcast -> div) run one-by-one by the
+interpreter. New bench `nn/softmax_4096x1024_decomposed_primitives` (lax_baseline) = **302 ms** vs the
+existing (but UNWIRED) fused `nn::softmax_2d` = **8.9 ms** = **34x**; vs JAX 0.10.2 f64 softmax
+(4096,1024) 4.79 ms, fj-decomposed is **63x SLOWER**, fj-fused only 1.85x. Per-primitive breakdown
+surfaced a contained, broadly-reachable bug: `BroadcastInDim` re-expanding a reduced `[n] -> [n,m]`
+(the softmax/layernorm/attention denominator broadcast) fell to a per-element ODOMETER (block_len==1,
+`base_of` mixed-radix decode over all 4M outputs) because `broadcast_replicate_into` only block-
+optimized trailing INPUT-MAPPED axes (bias case `[m]->[n,m]`), not trailing REPLICATED axes. Across
+replicated axes the source offset is CONSTANT -> it's a FILL, not a strided copy. Added the fill fast
+path (threaded, `bw_bound_threads`, bit-identical — pure replication, same values/positions).
+MEASURED `nn/softmax_step_broadcast` [4096]->[4096,1024] f64: **40.2 ms -> 17.9 ms = 2.24x**; full
+decomposed softmax 302 -> 245 ms. Bit-identical: 48 fj-lax broadcast tests pass incl.
+`broadcast_replicate_into_bit_identical_to_serial`. (Pre-existing UNRELATED RED:
+`rank3_sum_pool_xlane_simd_matches_dense_float`, a SIMD-vs-scalar NaN-payload pooling mismatch —
+`0xFFF8..` neg-NaN, does not call broadcast; documented SIMD-NaN class.) NEXT LEVER (filed, not this
+commit): wire `softmax_2d`/`log_softmax_2d` into the interpreter via a `try_eval_top_level_softmax`
+peephole (mirrors existing `try_eval_top_level_scan_*` in fj-interpreters lib.rs) for the ~34x — GATED
+on resolving softmax parity as TOLERANCE (softmax_2d's scalar `fold(f64::max)`/`+=` differ from fj-lax
+SIMD reduce_max/sum on +/-0 and NaN, so it is NOT a bit-identical drop-in for the decomposed path).
+
 ## 2026-07-02 - NEGATIVE/BOUNDARY: alien-graveyard yields NO applicable different-primitive FFT lever; every classic DSP variant collapses onto an already-measured no-ship (TealMarten)
 
 The biggest MEASURED unowned gap is still batched FFT (fft_batch_128x1000 23.5x, fft_batch_2048x256 42.7x vs JAX/pocketfft;
