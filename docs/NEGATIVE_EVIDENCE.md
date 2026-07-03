@@ -116,6 +116,19 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (completeness): U32 rank-2 van Herk maxpool/minpool (routes u32→i64 kernel) (TealMarten)
+
+Closed the last dtype gap in the rank-2 pooling family: the integer van Herk was I64|I32-gated, so U32
+rank-2 max/min pooling fell to the naive O(out·window) fold (u32 has its OWN storage, not i64-backed, so
+it couldn't share the i64 path directly). Since u32 is NON-NEGATIVE, i64 max/min IS the correct unsigned
+order — added a U32 dispatch branch that converts `as_u32_slice → Vec<i64>` (exact), runs
+`separable_reduce_window_rank2_maxmin_i64`, and narrows the extremum (always an input value → fits u32)
+back via `new_u32_values`. Structurally the SAME van Herk that measured ~3.1-3.7x over the deque/naive for
+i64, so the win transfers by construction (no perf-validation needed — it strictly replaces the slower
+naive path). Bit-exact incl. values near u32::MAX (new `u32_rank2_maxpool_matches_naive`: max+min vs the
+naive u32 fold). full fj-lax lib 1732/0. (u64 stays on naive — it can exceed i64::MAX so it needs a real
+u64 kernel; niche, not done.) The rank-2 max/min pooling family is now f64/f32/bf16/f16/i64/i32/U32.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT, CLOSED): fj hypot ~13x slower than JAX is a DELIBERATE overflow-safety choice, not a bug (TealMarten)
 
 fj Hypot uses scalar glibc `f64::hypot` (overflow-SAFE scaling). Measured fj hypot 4M f64 ≈ 9ms vs JAX
