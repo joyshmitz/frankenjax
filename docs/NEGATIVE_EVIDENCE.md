@@ -108,10 +108,20 @@ scatter-GEMM=1.95ms = 4.17x FASTER, and JAX=2.04ms → fj now BEATS JAX (~1.04x)
 documented contained gap (was 5.3x SLOWER) is closed and flipped to a win. Correctness is TOLERANCE-verified
 (conv_transpose_scatter_gemm_matches_dilate_conv: 7 configs — VALID/SAME/SAME_LOWER/explicit, s=2&3,
 non-square kernels, multi channel/batch, K>s overlap — all within 1e-9 of the exact dilate+conv). SAFELY
-GATED: `try_conv_transpose_scatter_gemm_2d_f64` returns None (→ exact dilate+conv fallback) for anything not
-covered — non-rank-4, non-f64, feature/batch grouping, rhs_dilation>1, conv-stride>1 — so ZERO regression
-risk; `FJ_CONVT_NAIVE` forces the old path. NEXT (smaller follow-ups): f32 sibling (JAX default dtype; needs
-an f32 GEMM or promote-to-f64), 1D (rank-3), and threading the scatter-add. Full fj-lax lib green.
+GATED: `try_conv_transpose_scatter_gemm_2d` returns None (→ exact dilate+conv fallback) for anything not
+covered — non-rank-4, dtype≠f64/f32, feature/batch grouping, rhs_dilation>1, conv-stride>1 — so ZERO
+regression risk; `FJ_CONVT_NAIVE` forces the old path. Full fj-lax lib green.
+
+UPDATE (f32 sibling shipped): generalized to F32 (JAX's default dtype) via the promote→f64-GEMM→round
+contract fj's forward f32 conv already uses (`conv_real_elements_as_f64` in, round the f64 result to f32
+out), tolerance-verified by `conv_transpose_scatter_gemm_f32_matches_dilate_conv` (4 configs within 1e-4).
+Same-invocation A/B [1,64,64,16]*[3,3,16,32] lhsdil2 SAME **f32: dilate+conv=10.23ms vs scatter-GEMM=2.22ms
+= 4.62x FASTER**. Honest vs-JAX: **JAX f32 = 1.49ms, so fj f32 is now ~1.48x SLOWER (was ~6.9x)** — a big
+improvement but NOT yet a win, because fj GEMMs f32 in f64 (matmul_2d, 2x the FLOPs + f64 memory) to match
+its own f64-accumulating forward conv, while JAX uses a native f32 GEMM. To BEAT JAX f32, swap matmul_2d for
+a native-f32 GEMM (fj has the f32 register microkernel) — a follow-up with an accuracy trade (f32 vs f64
+accum, still tolerance-legal). Remaining follow-ups: native-f32 GEMM for f32, 1D (rank-3), threaded
+scatter-add.
 
 ## 2026-07-03 - GAP SURFACED (data-backed, 5.3x): conv_transpose (lhs_dilation) wastes ~stride² on zero-multiplies (TealMarten)
 
