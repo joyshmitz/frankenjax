@@ -198,6 +198,12 @@ x_f64_vsjax`):
   Householder-tridiag + implicit-QL (the complex analog of the real tred2/tql2) — would flip this 10x
   loss to a win. Bench only n=128 (256 is multi-second). This is the honest counterexample to the eigh
   win: the win is REAL-only.
+- **COMPLEX QR: fj WINS** (unlike complex eigh) — fj complex Householder QR beats JAX's iterative complex
+  QR: `linalg/complex_qr_256x256_vsjax` fj **102.8ms vs JAX 384.8ms = 3.7x**; 512 fj **837.6ms vs 1288ms
+  = 1.54x** (win shrinks at 512 — fj's complex QR is heavy-complex O(n³)). KEY CONTRAST: complex QR wins
+  because it uses the fast HOUSEHOLDER algorithm (like real QR), while complex EIGH loses (10x) because it
+  uses slow complex JACOBI — so the complex-eigh fix is specifically "port eigh to Householder-tridiag,"
+  and complex QR already has the right algorithm.
 BOUNDARY (honest): cholesky/det/inv are LAPACK-backed in JAX and FAST (0.34/0.55/11.4ms at n=256), so
 those are fj LOSSES (LAPACK is hard to beat) — NOT recorded as wins. The eigh/qr wins are where JAX's
 CPU path is iterative; fj's direct tridiag/Householder algorithms dominate. Adds the decomposition family
