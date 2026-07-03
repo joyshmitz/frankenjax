@@ -15409,17 +15409,62 @@ fn batched_rank2_u64_matmul(
     b: &[u64],
     n: usize,
 ) -> Vec<u64> {
-    let mut out = vec![0u64; batch * m * n];
+    let mut result = vec![0u64; batch * m * n];
     if batch == 0 || m == 0 || n == 0 || k == 0 {
-        return out;
+        return result;
     }
-    for bt in 0..batch {
-        let a_slice = &a[bt * m * k..(bt + 1) * m * k];
-        let b_slice = &b[bt * k * n..(bt + 1) * k * n];
-        let slice = rank2_u64_matmul(a_slice, m, k, b_slice, n);
-        out[bt * m * n..(bt + 1) * m * n].copy_from_slice(&slice);
+    // Thread over the FLATTENED batch×output-row space (like `batched_rank2_i64_matmul`)
+    // for good load balance even when each item is small — the previous per-item serial
+    // loop left small-item bmm effectively single-threaded. Bit-identical (independent
+    // output rows; Z/2^64 ring).
+    let total_rows = batch * m;
+    let ops = total_rows.saturating_mul(k).saturating_mul(n);
+    let threads = matmul_thread_count(ops, total_rows);
+    if threads <= 1 {
+        batched_u64_row_block(a, b, m, k, n, 0, &mut result);
+        return result;
     }
-    out
+    let rows_per = total_rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [u64] = result.as_mut_slice();
+        let mut g_start = 0usize;
+        while g_start < total_rows {
+            let chunk_rows = rows_per.min(total_rows - g_start);
+            let (block, tail) = rest.split_at_mut(chunk_rows * n);
+            rest = tail;
+            let gs = g_start;
+            scope.spawn(move || batched_u64_row_block(a, b, m, k, n, gs, block));
+            g_start += chunk_rows;
+        }
+    });
+    result
+}
+
+/// u64 row-block for [`batched_rank2_u64_matmul`]: global output rows
+/// `[g_start, g_start + block.len()/n)`. Global row `g` is batch `g / m`, row `g % m`.
+/// u64 sibling of `batched_i64_row_block`.
+fn batched_u64_row_block(
+    a: &[u64],
+    b: &[u64],
+    m: usize,
+    k: usize,
+    n: usize,
+    g_start: usize,
+    block: &mut [u64],
+) {
+    for (ri, c_row) in block.chunks_mut(n).enumerate() {
+        let g = g_start + ri;
+        let bt = g / m;
+        let a_off = g * k;
+        let b_off = bt * k * n;
+        for l in 0..k {
+            let a_il = a[a_off + l];
+            let src = &b[b_off + l * n..b_off + l * n + n];
+            for (c, &bv) in c_row.iter_mut().zip(src) {
+                *c = c.wrapping_add(a_il.wrapping_mul(bv));
+            }
+        }
+    }
 }
 
 /// General UNSIGNED dot_general — ANY rank, ANY number of batch / contracting dims

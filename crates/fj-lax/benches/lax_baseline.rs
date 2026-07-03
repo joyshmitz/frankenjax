@@ -1417,6 +1417,23 @@ fn bench_int_gemm_family_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/uint64_matmul_512x512_vsjax", |bn| {
         bn.iter(|| eval_primitive(Primitive::Dot, &[ul.clone(), ur.clone()], &p))
     });
+
+    // u64 batched matmul (bmm) — same no-BLAS-in-JAX weakness as int64 bmm (JAX int64
+    // bmm 64x128 = 146.7ms; u64 uses the same slow XLA path). fj now flat-threads it.
+    let (bt, un) = (64usize, 128usize);
+    let ua2: Vec<u64> = (0..(bt * un * un))
+        .map(|i| (i as u64).wrapping_mul(2654435761) % 199)
+        .collect();
+    let ub2: Vec<u64> = (0..(bt * un * un))
+        .map(|i| (i as u64).wrapping_mul(40503) % 199)
+        .collect();
+    let ud = vec![bt as u32, un as u32, un as u32];
+    let ubl = Value::Tensor(TensorValue::new_u64_values(Shape { dims: ud.clone() }, ua2).unwrap());
+    let ubr = Value::Tensor(TensorValue::new_u64_values(Shape { dims: ud }, ub2).unwrap());
+    let pb = batched_matmul_params();
+    c.bench_function("eval/uint64_bmm_64x128_vsjax", |bn| {
+        bn.iter(|| eval_primitive(Primitive::DotGeneral, &[ubl.clone(), ubr.clone()], &pb))
+    });
 }
 
 fn bench_dot_100(c: &mut Criterion) {

@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - FIX + SURFACE: threaded batched u64 matmul (was serial per-item); + FILED an unexplained 6x batched-u64-vs-i64 gap (TealMarten)
+
+Continued the u64-GEMM parity work: `batched_rank2_u64_matmul` looped `for bt in 0..batch` (serial per
+item — each small item single-threaded), while `batched_rank2_i64_matmul` flat-threads over the whole
+batch×row space. Mirrored it: added `batched_u64_row_block` + flat-threaded dispatch over
+`matmul_thread_count(ops, batch*m)`. Bit-identical (independent output rows; Z/2^64 ring); 42 matmul
+tests + full fj-lax lib 1727/0 green. MEASURED u64 bmm 64x128 = **50.4ms vs JAX int64 bmm 146.7ms = 2.9x
+FASTER** (u64 uses the same no-BLAS XLA path as int64). BLOCKER SURFACED: u64 bmm 50.4ms is **~6x SLOWER
+than the i64 bmm 8.3ms** at the identical op count (both single-row batched row_block, same wrapping-MAC
+cost) — an UNEXPLAINED batched-u64 inefficiency (candidate causes: the unsigned DotGeneral permute/extract
+path vs the i64 canonical batched path, or a thread-count/dispatch difference; the batched kernels lack
+the 4-row register blocking the 2D path has, but that would hit i64 equally). FILED for investigation —
+the batched-u64 fix is a correct structural improvement but the 6x gap is the real remaining lever here.
+
 ## 2026-07-03 - FIX (real kernel win): threaded the u64 matmul — 3.53x (u64 512 GEMM 28.77ms -> 8.14ms, 41.7x vs JAX) (TealMarten)
 
 Turned last arc's SURFACED sub-gap into a shipped fix. `rank2_u64_matmul` (arithmetic.rs) ran the 4-row
