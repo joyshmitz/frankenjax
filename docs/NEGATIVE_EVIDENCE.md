@@ -69,6 +69,10 @@ path — JAX 0.10.2 x64: int64 matmul 512 = 336.6ms, 1024 = **3851ms** (int32 IS
 vectorizes 32-bit). fj has a blocked i64 GEMM kernel (new benches `eval/int64_matmul_{512,1024}_vsjax`):
 - **int64 matmul 512: fj 5.06ms vs JAX 336.6ms = 66.5x FASTER**
 - **int64 matmul 1024: fj 26.87ms vs JAX 3851ms = 143x FASTER**
+- **int64 BATCHED matmul (bmm) 64x128: fj 8.31ms vs JAX 146.7ms = 17.7x FASTER** (batched linear/GNN).
+- **uint64 matmul 512: fj 28.77ms vs JAX 339.2ms = 11.8x FASTER** (NOTE: fj u64 GEMM 28.77ms is ~5.6x
+  slower than fj i64 GEMM 5.06ms at the same 512 — the u64 kernel is less blocked than i64's 4-row path;
+  a future contained win, but it still crushes JAX's no-BLAS u64).
 Integer matmul (embeddings/indexing/exact arithmetic) is a clean fj domination — NOT FMA-gated (integer
 = exact, no bit-parity FMA wall), NOT threading-fragile (compute-bound GEMM). Contrasts with FLOAT matmul
 which IS an fj loss (FMA-policy-gated, ~XLA/2). Biggest single-op win recorded alongside top_k-per-row

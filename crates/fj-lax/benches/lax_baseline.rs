@@ -1370,6 +1370,55 @@ fn bench_int64_matmul_vs_jax(c: &mut Criterion) {
     }
 }
 
+// int64 batched matmul + u64 matmul vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02, no int BLAS):
+// int64 bmm 64x128 = 146.7ms, uint64 matmul 512 = 339.2ms.
+fn bench_int_gemm_family_vs_jax(c: &mut Criterion) {
+    let (bt, n) = (64usize, 128usize);
+    let a: Vec<i64> = (0..(bt * n * n))
+        .map(|i| ((i.wrapping_mul(2654435761) % 199) as i64) - 100)
+        .collect();
+    let b: Vec<i64> = (0..(bt * n * n))
+        .map(|i| ((i.wrapping_mul(40503) % 199) as i64) - 100)
+        .collect();
+    let d = vec![bt as u32, n as u32, n as u32];
+    let lhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims: d.clone() }, a).unwrap());
+    let rhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims: d }, b).unwrap());
+    let pb = batched_matmul_params();
+    c.bench_function("eval/int64_bmm_64x128_vsjax", |bn| {
+        bn.iter(|| eval_primitive(Primitive::DotGeneral, &[lhs.clone(), rhs.clone()], &pb))
+    });
+
+    let m = 512usize;
+    let ua: Vec<u64> = (0..m * m)
+        .map(|i| (i as u64).wrapping_mul(2654435761) % 199)
+        .collect();
+    let ub: Vec<u64> = (0..m * m)
+        .map(|i| (i as u64).wrapping_mul(40503) % 199)
+        .collect();
+    let ul = Value::Tensor(
+        TensorValue::new_u64_values(
+            Shape {
+                dims: vec![m as u32, m as u32],
+            },
+            ua,
+        )
+        .unwrap(),
+    );
+    let ur = Value::Tensor(
+        TensorValue::new_u64_values(
+            Shape {
+                dims: vec![m as u32, m as u32],
+            },
+            ub,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/uint64_matmul_512x512_vsjax", |bn| {
+        bn.iter(|| eval_primitive(Primitive::Dot, &[ul.clone(), ur.clone()], &p))
+    });
+}
+
 fn bench_dot_100(c: &mut Criterion) {
     let data: Vec<i64> = (0..100).collect();
     let lhs = Value::vector_i64(&data).unwrap();
@@ -7815,6 +7864,7 @@ criterion_group!(
     bench_nextafter_1k,
     bench_logsumexp_1d_large,
     bench_int64_matmul_vs_jax,
+    bench_int_gemm_family_vs_jax,
     bench_dot_100,
     bench_dot_256_matrix_f64,
     bench_eig_48,
