@@ -62,6 +62,22 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - CORRECTION to the pooling-gap entry below: rank-2 SUM w7 IS separable+fast (2.66ms); real gap is rank-2 MAX + small-window sum (TealMarten)
+
+The entry below overstated the gap. Verified `separable_reduce_window_sum_f64` IS a RANK-2 function (not
+4D-only) — gated to window>=25 taps. New bench `eval/sumpool2d_1024x1024_w7s1_valid_f64` (49 taps):
+**fj 2.66ms** — the separable running-sum FIRES for rank-2 large windows and is fast. So rank-2 sum is
+COVERED for large windows; my "rank-2 sum has no separable path" was wrong. ACCURATE gap boundary:
+- **rank-2 MAX, any window: NO separable path** -> generic O(out·win²) (maxpool2d w7 21ms vs JAX 1.28ms
+  = 16.5x). This is the one genuine coverage gap. Fix = a rank-2 separable-max (deque/van-Herk row-then-
+  column, bit-exact since max is order-independent), mirroring the existing 4D-NHWC van-Herk.
+- **small-window SUM (<25 taps): deliberately gated out of separable** (separable overhead > naive fold
+  for tiny windows), falls to the generic threaded cell loop = sumpool2d 3x3 17ms vs JAX 0.32ms. The
+  generic loop is ~8x slower than it should be for 9 taps (per-cell odometer/interior overhead), but
+  separable is NOT the right fix at 3x3 (more memory traffic). This is generic-cell-loop tuning, niche.
+Net: the important 4D-NHWC CNN pooling is covered; rank-2 plain-matrix MAX is the clean uncovered shape.
+Still filed (not fixed — actively-worked van-Herk area, and rank-2 plain pooling is a niche layout).
+
 ## 2026-07-02 - GAP SURFACED: RANK-2 plain-matrix pooling is 16-54x slower than JAX (separable paths cover only 4D NHWC) (TealMarten)
 
 Pooling sweep vs JAX 0.10.2 x64 (jaxvenv, `pool_sweep.py`) + new dense-input fj benches (`bench_pool_vs_jax`):

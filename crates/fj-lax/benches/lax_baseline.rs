@@ -4568,6 +4568,15 @@ fn bench_pool_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/sumpool2d_1024x1024_w3s1_valid_f64", |b| {
         b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_sum3))
     });
+    // w7 sum (49 taps >= 25) SHOULD hit the rank-2 separable running-sum path.
+    let mut p_sum7 = BTreeMap::new();
+    p_sum7.insert("reduce_op".to_owned(), "sum".to_owned());
+    p_sum7.insert("window_dimensions".to_owned(), "7,7".to_owned());
+    p_sum7.insert("window_strides".to_owned(), "1,1".to_owned());
+    p_sum7.insert("padding".to_owned(), "VALID".to_owned());
+    c.bench_function("eval/sumpool2d_1024x1024_w7s1_valid_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_sum7))
+    });
     let d = 256usize;
     let cube = Value::Tensor(
         TensorValue::new_f64_values(
