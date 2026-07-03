@@ -116,6 +116,20 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (2.77x measured): i64/i32 leading-axis cumulative — contiguous streaming vs strided serial (TealMarten)
+
+Different primitive (cumulative, not pooling). The i64/i32 cumsum/cummax/cummin/cumprod along the LEADING
+axis (axis 0, strided) used a CACHE-HOSTILE strided serial scan (`out[base + i*axis_stride]` — a cache miss
+per element), while f64/f32 already stream the leading axis CONTIGUOUSLY (the 1.65x-vs-JAX path). Couldn't
+reuse `scan_leading_axis_to_vec` — it accumulates in f64 (lossy for |i64| > 2^53). Added
+`scan_leading_axis_i64`: contiguous per-column i64 accumulators (L1-resident), streaming rows — bit-
+identical (same per-column sequential int_op, same order; wrapping add is a ring), CONTIGUOUS reads/writes.
+Clean same-binary A/B (`eval/cumsum_16kx1k_i64_axis0`, `FJ_CUMSUM_I64_STRIDED` toggle, load low): strided
+**241ms -> contiguous 86.9ms = 2.77x**. Bit-exact incl. values > 2^53 + cummax + reverse
+(`i64_leading_axis_cumulative_matches_serial_reference`). Covers i64 AND i32 (shared i64 backing). full
+fj-lax lib 1736/0. FOLLOW-UP: still SERIAL (f64 leading-axis is THREADED — another ~3x); a threaded i64
+leading-axis (3-pass prefix with an i64 carry, exact) would close the residual ~1.9x vs JAX. Filed.
+
 ## 2026-07-03 - WIRED WIN (completeness): rank-2 BF16/F16 SUM-pool (widen→f64 separable→round) (TealMarten)
 
 Closed the last SUM-pool dtype gap: bf16/f16 rank-2 box/avg-pool (mixed-precision) fell to the naive

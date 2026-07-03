@@ -3429,6 +3429,29 @@ fn bench_cummin_4096x1024_f32_axis1(c: &mut Criterion) {
 // each a 16384-deep scan read at stride 1024 by the current serial strided path.
 // Measures the leading-axis cumulative gap vs JAX (head-to-head:
 // benchmarks/jax_comparison/cumsum_axis0_gauntlet.py).
+// i64 leading-axis (axis 0) cumsum: contiguous streaming (exact i64 acc) vs the old strided serial scan
+// (env FJ_CUMSUM_I64_STRIDED). 16384x1024, matches the f64 axis0 bench.
+fn bench_cumsum_i64_axis0(c: &mut Criterion) {
+    let (rows, cols) = (16384usize, 1024usize);
+    let data: Vec<i64> = (0..rows * cols)
+        .map(|i| (i as i64).wrapping_mul(2_654_435_761) % 1_000_003)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumsum_16kx1k_i64_axis0", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_cumsum_16k_x_1k_f64_axis0(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
     let data: Vec<f64> = (0..rows * cols)
@@ -8607,6 +8630,7 @@ criterion_group!(
     bench_cummax_4096x1024_f32_axis1,
     bench_cummin_4096x1024_f32_axis1,
     bench_cumsum_16k_x_1k_f64_axis0,
+    bench_cumsum_i64_axis0,
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,
