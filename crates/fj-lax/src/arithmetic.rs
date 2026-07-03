@@ -14878,6 +14878,25 @@ fn rank2_u64_matmul_dot(
     let m = lhs.shape.dims[0] as usize;
     let k = lhs.shape.dims[1] as usize;
     let n = rhs.shape.dims[1] as usize;
+    // Dense-u64 fast path: use the raw `as_u64_slice()` backings directly + DENSE output,
+    // mirroring the i64 path. The `dot_u64_elements` fallback below materializes a Literal
+    // per element (needed only for u32-widen / boxed operands) and `u64_matmul_output`
+    // builds a boxed Vec<Literal> — together ~1.6x over the i64 dense path at 512³.
+    if let (Some(a), Some(b)) = (lhs.elements.as_u64_slice(), rhs.elements.as_u64_slice()) {
+        let values = rank2_u64_matmul(a, m, k, b, n);
+        let shape = Shape {
+            dims: output_dims.to_vec(),
+        };
+        let out = match out_dtype {
+            DType::U64 => Value::Tensor(TensorValue::new_u64_values(shape, values)?),
+            DType::U32 => {
+                let v32: Vec<u32> = values.into_iter().map(|v| v as u32).collect();
+                Value::Tensor(TensorValue::new_u32_values(shape, v32)?)
+            }
+            _ => return Ok(None),
+        };
+        return Ok(Some(out));
+    }
     let (Some(a), Some(b)) = (dot_u64_elements(lhs), dot_u64_elements(rhs)) else {
         return Ok(None);
     };

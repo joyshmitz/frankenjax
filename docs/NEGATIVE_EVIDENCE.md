@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - FIX (closes the u64-vs-i64 residual): dense-u64 fast path in the 2D Dot — u64 matmul 8.14->5.31ms = 1.53x (63.9x vs JAX) (TealMarten)
+
+Closed the last integer-GEMM residual (I'd noted u64 2D matmul was ~1.6x slower than i64 despite both
+threading). `rank2_u64_matmul_dot` extracted operands via `dot_u64_elements` (materializes a Literal per
+element) and built BOXED output via `u64_matmul_output`, while the i64 path uses `as_i64_slice()` directly
++ dense `new_i64_values`. Added a dense-u64 fast path (both operands `as_u64_slice()` -> `rank2_u64_matmul`
+-> dense `new_u64_values`/`new_u32_values`; the extract+boxed fallback stays for u32-widen/boxed operands).
+MEASURED u64 matmul 512: **8.14 -> 5.31ms = 1.53x**, now MATCHES i64 (5.06ms); **63.9x vs JAX 339.2ms**
+(was 41.7x). Bit-identical; 42 matmul + full fj-lax lib 1727/0 green. Integer-GEMM family is now fully
+tuned: i64/u64 2D ~5ms, bmm ~8ms; u32 rides the same paths. Same-dtype-asymmetry lesson again (u64 had a
+per-element-extract + boxed-output path where i64 had direct-slice + dense).
+
 ## 2026-07-03 - WIN + FIX: uint32 GEMM is ALSO a JAX weakness — u32 matmul 31.3x FASTER; extended canonical bmm path to u32 (49->11.85ms) (TealMarten)
 
 KEY: XLA does NOT vectorize UNSIGNED 32-bit (unlike SIGNED int32 which is fast 0.66ms): **JAX uint32
