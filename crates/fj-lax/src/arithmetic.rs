@@ -2617,6 +2617,9 @@ fn eval_f64_scalar_broadcast_binop(
         Primitive::Min => {
             f64_scalar_broadcast_jax(scalar, tensor, scalar_on_left, crate::jax_min_f64)
         }
+        // NOTE (TealMarten 2026-07-03): a native-f64 SIMD scalar-broadcast atan2 (splat + atan2_f64x8,
+        // threaded) was a NO-WIN (1.0x vs the scalar map at 4M) even though the SAME-shape atan2_f64x8 wins
+        // 1.5-1.9x — the single-tensor scalar-broadcast case is BW-bound / dispatched differently. DO-NOT.
         Primitive::Atan2 => f64_scalar_broadcast_fn(scalar, tensor, scalar_on_left, f64::atan2),
         _ => Ok(None),
     }

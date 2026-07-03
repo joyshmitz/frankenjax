@@ -3541,6 +3541,22 @@ fn bench_atan2_8m_f64(c: &mut Criterion) {
     });
 }
 
+// f64 scalar-broadcast atan2: atan2(tensor, k) — native-f64 SIMD (splat + atan2_f64x8) vs scalar libm
+// (env-toggle FJ_ATAN2_SCALAR). Extends the same-shape atan2 win to the scalar-broadcast case.
+fn bench_atan2_bcast_4m_f64(c: &mut Criterion) {
+    let n = 1usize << 22;
+    let xs: Vec<f64> = (0..n).map(|i| (i % 47000) as f64 * 0.0001 - 2.3).collect();
+    let sh = Shape {
+        dims: vec![n as u32],
+    };
+    let xt = Value::Tensor(TensorValue::new_f64_values(sh, xs).unwrap());
+    let k = Value::Scalar(Literal::from_f64(0.7));
+    let p = BTreeMap::new();
+    c.bench_function("eval/atan2_bcast_4m_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Atan2, &[xt.clone(), k.clone()], &p))
+    });
+}
+
 // f64 xlogy = x*ln(y) (cross-entropy/KL hot path) — native-f64 SIMD (x*log_f64x8(y)) vs the scalar
 // libm-ln map (env-toggle FJ_XLOGY_SCALAR). y.ln() is opaque libm (no autovec); log wins no-FMA.
 fn bench_xlogy_2m_f64(c: &mut Criterion) {
@@ -8601,6 +8617,7 @@ criterion_group!(
     bench_assoc_scan_bf16_batched,
     bench_rsqrt_8m_f64,
     bench_atan2_8m_f64,
+    bench_atan2_bcast_4m_f64,
     bench_xlogy_2m_f64,
     bench_tan_2m_f64,
     bench_conv_transpose_lhsdil2_f64,

@@ -116,6 +116,17 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - NEGATIVE: SCALAR-BROADCAST atan2 SIMD is a no-win (1.0x) despite same-shape winning 1.9x (TealMarten)
+
+Tried extending the atan2_f64x8 win to the scalar-broadcast case (`atan2(tensor, k)` — splat k, reuse the
+kernel, threaded). Tolerance-verified (both operand orders, maxerr < 1e-9). But A/B (`eval/atan2_bcast_4m
+_f64`, `FJ_ATAN2_SCALAR`, load 12): SIMD 10.32ms vs scalar 10.23ms = **1.0x (marginally slower)** — even
+though the SAME-shape atan2_f64x8 wins 1.5-1.9x. The single-tensor scalar-broadcast path behaves
+differently (BW-bound at half the traffic, and/or the scalar operand is broadcast-to-same-shape upstream so
+the helper doesn't gate the hot path). Reverted (DO-NOT comment + bench marker kept). LESSON: a SIMD win on
+the 2-tensor same-shape case does NOT automatically transfer to the 1-tensor scalar-broadcast case — the
+BW/compute balance differs. 6 atan2 tests green.
+
 ## 2026-07-03 - WIRED WIN (1.5-1.9x): native-f64 SIMD atan2 (opaque libm → f64x8 poly) (TealMarten)
 
 Applied the rsqrt lesson (hand-SIMD ONLY opaque libm calls, not autovectorizable hardware ops) to find a
