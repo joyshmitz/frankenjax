@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - NEGATIVE/BOUNDARY: f64 erf/lgamma/digamma/bessel_i0e are FMA-gated LOSSES (2.4-3x slower than JAX) — refines the special-fn win/loss split (TealMarten)
+
+Measured fj f64 special functions 4M vs JAX 0.10.2 x64 (new benches `eval/{erf,lgamma,digamma,bessel_i0e}
+_4m_f64_vsjax`, dense input):
+- **erf: fj 37.66ms vs JAX 13.46ms = 2.8x SLOWER**
+- **lgamma: fj 14.90ms vs JAX 6.11ms = 2.4x SLOWER**
+- **digamma: fj 15.69ms vs JAX 5.27ms = 2.98x SLOWER**
+- **bessel_i0e: fj 16.29ms vs JAX 6.08ms = 2.68x SLOWER**
+All LOSSES — the FMA-policy-gated class: JAX's erf/lgamma/digamma/bessel polynomials are FMA-contracted
+(hardware fma), fj's are threaded-SCALAR without the `+fma` flag (deliberately avoided), so ~2.4-3x behind
+(the same ~XLA/2 wall as float matmul/exp). This REFINES the special-fn map: the recorded WINS
+(igamma/igammac 16-131x, zeta 1.7-2.6x) are where JAX's CPU special-fn is ALSO slow/unvectorized; the
+COMMON transcendentals (erf/lgamma/digamma/bessel) JAX DOES vectorize+FMA, so those are fj losses. NOT
+fixable without the maintainer `+fma` decision (or a scoped-unsafe SIMD-poly module) — same blocker as
+the FFT/GEMM FMA wall. DO-NOT re-attempt f64 erf/lgamma/digamma/bessel as vs-JAX wins.
+
 ## 2026-07-03 - FIX (closes the u64-vs-i64 residual): dense-u64 fast path in the 2D Dot — u64 matmul 8.14->5.31ms = 1.53x (63.9x vs JAX) (TealMarten)
 
 Closed the last integer-GEMM residual (I'd noted u64 2D matmul was ~1.6x slower than i64 despite both

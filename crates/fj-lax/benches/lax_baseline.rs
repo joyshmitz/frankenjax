@@ -307,6 +307,33 @@ fn bench_erf_1m_f64_vec(c: &mut Criterion) {
     });
 }
 
+// f64 special functions at 4M vs JAX 0.10.2 x64 (jaxvenv, 2026-07-03): erf 13.46ms,
+// lgamma 6.11ms, digamma 5.27ms, bessel_i0e 6.08ms. fj threads native implementations.
+fn bench_special_fns_4m_vs_jax(c: &mut Criterion) {
+    let n = 1usize << 22;
+    let pos: Vec<f64> = (0..n).map(|i| ((i % 9973) as f64) * 1e-3 + 0.5).collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            pos,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    for (prim, name) in [
+        (Primitive::Erf, "erf"),
+        (Primitive::Lgamma, "lgamma"),
+        (Primitive::Digamma, "digamma"),
+        (Primitive::BesselI0e, "bessel_i0e"),
+    ] {
+        c.bench_function(&format!("eval/{name}_4m_f64_vsjax"), |b| {
+            b.iter(|| eval_primitive(prim, std::slice::from_ref(&input), &p))
+        });
+    }
+}
+
 // 256k polygamma(2, x) over a dense f64 tensor: polygamma_approx is a heavy
 // series/asymptotic evaluation per element — compute-bound, threads.
 fn bench_polygamma_n2_256k_f64(c: &mut Criterion) {
@@ -7891,6 +7918,7 @@ criterion_group!(
     bench_atan2_1m_f64_vec,
     bench_xlogy_4m_f64_vec,
     bench_erf_1m_f64_vec,
+    bench_special_fns_4m_vs_jax,
     bench_polygamma_n2_256k_f64,
     bench_igamma_256k_f64,
     bench_cbrt_1m_f64_vec,
