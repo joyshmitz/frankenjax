@@ -4536,6 +4536,64 @@ fn bench_reduce_sum_256_axis1_complex_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Pooling vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02, VALID padding): maxpool2d 1024^2
+// w7s1 = 1.28ms, sumpool2d 1024^2 w3s1 = 0.32ms, sumpool3d 256^3 w2s2 = 2.78ms.
+fn bench_pool_vs_jax(c: &mut Criterion) {
+    // Dense f64 storage (real_matrix builds a boxed Vec<Literal> which mis-attributes
+    // cost to the generic per-Literal path — the interpreter feeds dense tensors).
+    let m = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![1024, 1024],
+            },
+            (0..1024 * 1024)
+                .map(|i| ((i as f64) * 1e-4).sin())
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let mut p_max7 = BTreeMap::new();
+    p_max7.insert("reduce_op".to_owned(), "max".to_owned());
+    p_max7.insert("window_dimensions".to_owned(), "7,7".to_owned());
+    p_max7.insert("window_strides".to_owned(), "1,1".to_owned());
+    p_max7.insert("padding".to_owned(), "VALID".to_owned());
+    c.bench_function("eval/maxpool2d_1024x1024_w7s1_valid_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_max7))
+    });
+    let mut p_sum3 = BTreeMap::new();
+    p_sum3.insert("reduce_op".to_owned(), "sum".to_owned());
+    p_sum3.insert("window_dimensions".to_owned(), "3,3".to_owned());
+    p_sum3.insert("window_strides".to_owned(), "1,1".to_owned());
+    p_sum3.insert("padding".to_owned(), "VALID".to_owned());
+    c.bench_function("eval/sumpool2d_1024x1024_w3s1_valid_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_sum3))
+    });
+    let d = 256usize;
+    let cube = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![d as u32, d as u32, d as u32],
+            },
+            (0..d * d * d).map(|i| ((i as f64) * 1e-4).sin()).collect(),
+        )
+        .unwrap(),
+    );
+    let mut p_sum3d = BTreeMap::new();
+    p_sum3d.insert("reduce_op".to_owned(), "sum".to_owned());
+    p_sum3d.insert("window_dimensions".to_owned(), "2,2,2".to_owned());
+    p_sum3d.insert("window_strides".to_owned(), "2,2,2".to_owned());
+    p_sum3d.insert("padding".to_owned(), "VALID".to_owned());
+    c.bench_function("eval/sumpool3d_256cube_w2s2_valid_f64", |b| {
+        b.iter(|| {
+            eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&cube),
+                &p_sum3d,
+            )
+        })
+    });
+}
+
 fn bench_reduce_window_64x64(c: &mut Criterion) {
     let input = real_matrix(64, 64);
     let mut params = BTreeMap::new();
@@ -7672,6 +7730,7 @@ criterion_group!(
     bench_topk_64k_k128_u32_literal_reference,
     bench_topk_64k_k128_u64_vec,
     bench_topk_64k_k128_u64_literal_reference,
+    bench_pool_vs_jax,
     bench_reduce_window_64x64,
     bench_maxpool_256x256_f64_vec,
     bench_maxpool_256x256_f64_literal_reference,

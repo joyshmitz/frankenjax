@@ -62,6 +62,26 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - GAP SURFACED: RANK-2 plain-matrix pooling is 16-54x slower than JAX (separable paths cover only 4D NHWC) (TealMarten)
+
+Pooling sweep vs JAX 0.10.2 x64 (jaxvenv, `pool_sweep.py`) + new dense-input fj benches (`bench_pool_vs_jax`):
+- **maxpool2d 1024x1024 w7s1 VALID: fj 21.2ms vs JAX 1.28ms = 16.5x SLOWER**
+- **sumpool2d 1024x1024 w3s1 VALID: fj 17.3ms vs JAX 0.32ms = 54x SLOWER**
+- sumpool3d 256^3 w2s2 VALID: fj 7.65ms vs JAX 2.78ms = 2.75x slower (rank-3 xlane sum path exists, still loses)
+(NOTE: `real_matrix` builds a BOXED Vec<Literal> — my first run read 155ms/45ms; dense `new_f64_values`
+gives the honest 21/17ms above. Always dense-input for pooling benches.)
+ROOT CAUSE: the separable fast paths (`separable_reduce_window_sum_f64/f32`,
+`separable_reduce_window_maxmin_4d_nhwc_f32/f64` van-Herk) are gated to **4D NHWC** (the CNN layout
+`[N,H,W,C]`, window `[1,wh,ww,1]`) + a rank-2 3x3-SAME-sum special case. A RANK-2 plain matrix with a
+VALID/large window or MAX has **no separable path** → falls to the threaded generic O(out·win²) `cell`
+loop (`eval_reduce_window_dense_float`), which threads but is 49 taps/output for w7. The important CNN
+case (4D NHWC) IS covered/optimized; rank-2 plain pooling is the uncovered shape. LEVER (filed, NOT done
+— this is an ACTIVELY-worked area with in-progress van-Herk separable variants + known JAX-loss notes at
+lib.rs:4177, high collision risk): extend `separable_reduce_window_maxmin`/`_sum` to rank-2 (and generic
+non-NHWC layouts). Committed the dense benches as reproducers to point the active pooling work at the
+rank-2/rank-3 shapes. Bit-exact-safe: MAX is separable+order-independent (deque/van-Herk); rank-2 SUM
+separable is the same running-sum already used for 4D NHWC.
+
 ## 2026-07-02 - FIX (RED->GREEN): fj-lax lib suite was 1726/1 — the 1 failure was a NaN-sign test-strictness bug, now GREEN (TealMarten)
 
 The fj-lax `--lib` suite had ONE failing test on main since 2026-06-27 (47da44ad):
