@@ -213,6 +213,32 @@ CPU path is iterative; fj's direct tridiag/Householder algorithms dominate. Adds
 to the domination map (order-statistics 6-205x + eigh/qr 5-16x); both are ALGORITHM wins (fj picks the
 better method), threading-independent.
 
+## 2026-07-03 - WIN + BOUNDARY: int64 ARGSORT 3.35x FASTER but int64 SORT is PARITY (XLA vectorizes int sort) (TealMarten)
+
+int64 4M (new benches `eval/{sort,argsort}_4m_i64_vsjax`): **int64 argsort: fj 335.5ms vs JAX 1123.7ms =
+3.35x FASTER**, but **int64 SORT: fj 202.2ms vs JAX 199.3ms = 0.99x = PARITY**. BOUNDARY (the exception to
+the sort-win pattern): unlike f64/f32/bf16 where JAX full-sorts (fj wins 6-14x), XLA HAS an optimized
+int64 sort path (199ms, ~5x faster than its own f64 sort) — so int64 sort is a tie, NOT a win. But int64
+ARGSORT still full-sorts-with-indices in JAX (slow) → fj radix argsort wins 3.35x. LESSON: JAX's sort
+speed is dtype-dependent — it vectorizes integer VALUE sort but not float sort nor index-carrying argsort;
+match the specific (dtype, op) before claiming a sort win.
+
+## 2026-07-03 - PLAN (upgraded): complex eigh fix via REAL-EMBEDDING (reuses fast real eigh) — much more tractable than complex-Householder (TealMarten)
+
+Better plan for the complex-eigh 10x loss than "port complex Householder-tridiag". A Hermitian H = A + iB
+(A=Re symmetric, B=Im antisymmetric) maps to the 2n×2n REAL SYMMETRIC M = [[A, -B], [B, A]]: `M[x;y] =
+λ[x;y]` ⟺ `H(x+iy) = λ(x+iy)`, so M's eigenpairs give H's directly, and each H-eigenvalue appears TWICE in
+M. So: build M, run fj's EXISTING FAST real eigh (tred2/tql2) on the 2n matrix (no new complex kernel!),
+extract n eigenvalues (dedupe pairs) + complex eigenvectors v = x[0..n] + i·x[n..2n]. Est. ~30ms at n=256
+(real eigh 512 = 191ms... actually 2n=512 → ~191ms; still ~14x under JAX's 2.7s complex path — flips the
+loss to a WIN). SAFETY: eigh parity is RECONSTRUCTION + sorted spectrum (linalg.rs:2342), NOT bit-pinned
+eigenvectors — so validatable against the existing correct-but-slow complex Jacobi + the conformance suite.
+CRITICAL GOTCHA (identified + must handle): DEGENERATE eigenvalues (e.g. `oracle_eigh_complex128_hermitian
+_identity`) — naive every-other extraction yields NON-orthogonal complex eigenvectors (identity → v_0=[1,0],
+v_1=[i,0], ⟨v_0,v_1⟩=i≠0, reconstruction FAILS). Fix: complex Gram-Schmidt WITHIN each equal-eigenvalue
+group. That degeneracy handling is the only intricate part; the rest reuses real eigh. Multi-turn/careful
+(parity-absolute), NOT rushed — but this is the concrete de-risked path, superseding the Householder plan.
+
 ## 2026-07-03 - WIN (recorded): fj f32/bf16 sort 6.9-13.9x FASTER than JAX (the ML dtypes) (TealMarten)
 
 Extended the sort domination to the ML training/inference dtypes. JAX full-sorts them (4M): bf16 sort =
