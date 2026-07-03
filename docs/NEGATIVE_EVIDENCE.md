@@ -196,8 +196,10 @@ x_f64_vsjax`):
   slow complex cyclic Jacobi with the REAL-EMBEDDING: `complex_hermitian_eigh_via_real_embedding` builds
   M = [[A,-B],[B,A]] (2n×2n real symmetric, H=A+iB), runs the fast real `tridiag_ql_eigendecomposition`,
   extracts n eigenvalues + complex eigenvectors v=x+iy with per-eigenvalue-group complex modified
-  Gram-Schmidt (handles degeneracy — the identity case). **fj 128 = 22.0ms = 5.4x FASTER than JAX** (was
-  10x slower). VALIDATED: 12/12 conformance eigh oracle tests pass (incl. `oracle_eigh_complex128
+  Gram-Schmidt (handles degeneracy — the identity case). **fj 128 = 22.0ms = 5.4x FASTER; fj 256 =
+  180.2ms vs JAX 3196ms = 17.7x FASTER** (the win GROWS with n — JAX complex eigh scales ~27x per 2x
+  size, the real-embedding is O(n³) ~8x). Was 10x slower. VALIDATED: 12/12 conformance eigh oracle tests
+  pass (incl. `oracle_eigh_complex128
   _hermitian_identity` degeneracy + `metamorphic_eigh_reconstruction`), full fj-lax lib 1727/0 green. This
   was the biggest fixable vs-JAX loss on record — now a win. The real-embedding reuses the fast real eigh
   (no new complex numerical kernel), exactly as the QR/eig-win diagnosis predicted. Bit-exactness note:

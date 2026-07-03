@@ -1856,7 +1856,7 @@ fn bench_complex_qr_vs_jax(c: &mut Criterion) {
 // (real-embedding M=[[A,-B],[B,A]] + real tridiag-QL, replacing the slow complex
 // Jacobi): fj 128 = 22.0ms = 5.4x FASTER (was 1.23s = 10x SLOWER). Loss -> WIN.
 fn bench_complex_eigh_vs_jax(c: &mut Criterion) {
-    for n in [128usize] {
+    for n in [128usize, 256] {
         let mut elems: Vec<Literal> = Vec::with_capacity(n * n);
         for i in 0..n {
             for j in 0..n {
