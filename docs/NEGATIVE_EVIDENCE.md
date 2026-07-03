@@ -116,6 +116,19 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (completeness): rank-2 BF16/F16 SUM-pool (widen→f64 separable→round) (TealMarten)
+
+Closed the last SUM-pool dtype gap: bf16/f16 rank-2 box/avg-pool (mixed-precision) fell to the naive
+O(out·window) fold (the separable running-sum was f64/f32/i64/i32 only). Added a branch that widens the
+half taps to f64 EXACTLY (the same widen the naive per-tap path uses), runs the existing
+`separable_reduce_window_sum_f64`, and rounds each output back via `reduce_window_literal_from_f64` (the
+SAME round the naive uses). Bit-IDENTICAL to the naive (f64-fold→bf16-round): the running-sum's ~1e-13 f64
+reassociation is FAR below bf16's ~1e-2 resolution, so the rounded bits never differ — verified by new
+`bf16_rank2_sumpool_matches_naive` (w5 VALID vs the naive f64-fold→round). Window-independent O(input) vs
+naive O(out·window); reuses the proven f64 separable, so the win transfers by construction. full fj-lax lib
+1735/0. The rank-2 pooling family is now COMPLETE: max/min = f64/f32/bf16/f16/i64/i32/u32, sum =
+f64/f32/bf16/f16/i64/i32. (Only sub-w5 windows below the amortization gate + u64 max/min stay naive.)
+
 ## 2026-07-03 - WIRED WIN (completeness): rank-2 I32 SUM-pool separable (i64 prefix + wrap-narrow) (TealMarten)
 
 Followed the i64 rank-2 sum win with i32 (JAX's DEFAULT int). i32 shares the i64 backing, and sum-mod-2^32

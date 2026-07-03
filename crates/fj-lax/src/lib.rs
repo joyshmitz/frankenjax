@@ -9789,6 +9789,59 @@ fn eval_reduce_window(
         ));
     }
 
+    // bf16/f16 rank-2 SUM (mixed-precision box/avg-pool): widen the half taps to f64 EXACTLY (the same
+    // widen the naive per-tap path applies), run the f64 separable running-sum, and round each output back
+    // via `reduce_window_literal_from_f64` (the SAME round the naive path uses). Matches the naive f64
+    // accumulator up to running-sum reassociation (tolerance; same-vs-valid metamorphic preserved), the
+    // same contract as the f64/f32 rank-2 sum. Otherwise bf16/f16 rank-2 sum fell to the naive fold.
+    if no_base_dilation
+        && no_window_dilation
+        && matches!(tensor.dtype, fj_core::DType::BF16 | fj_core::DType::F16)
+        && rank == 2
+        && reduce_window_sum_like(reduce_op)
+        && let Some(bits) = tensor.elements.as_half_float_slice()
+    {
+        let widened = if tensor.dtype == fj_core::DType::BF16 {
+            crate::arithmetic::widen_bf16_slice_to_f64(bits)
+        } else {
+            crate::arithmetic::widen_f16_slice_to_f64(bits)
+        };
+        let f64_tensor = TensorValue::new_f64_values(tensor.shape.clone(), widened)
+            .map_err(EvalError::InvalidTensor)?;
+        if let Some(output) = separable_reduce_window_sum_f64(
+            &f64_tensor,
+            tensor.shape.dims[0] as usize,
+            tensor.shape.dims[1] as usize,
+            out_dims[0] as usize,
+            out_dims[1] as usize,
+            window_dims[0],
+            window_dims[1],
+            strides[0],
+            strides[1],
+            pad_lows[0],
+            pad_lows[1],
+        ) {
+            let dt = tensor.dtype;
+            let out_bits: Vec<u16> = output
+                .iter()
+                .map(|&v| match reduce_window_literal_from_f64(dt, v) {
+                    fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                    _ => 0,
+                })
+                .collect();
+            return Ok(Value::Tensor(
+                TensorValue::new_half_float_values(
+                    dt,
+                    Shape {
+                        dims: out_dims.to_vec(),
+                    },
+                    out_bits,
+                )
+                .map_err(EvalError::from)?,
+            ));
+        }
+    }
+
     // Separable monotonic-deque MAX/MIN fast path: a box max/min is the composition
     // of per-axis 1-D sliding extrema (max/min are separable + order-independent),
     // each computable WINDOW-INDEPENDENTLY in O(axis_len) by a monotonic deque —
@@ -13647,6 +13700,65 @@ mod tests {
             }
         }
         assert_eq!(got, want, "i32 rank-2 sumpool wrap diverges from naive");
+    }
+
+    // Rank-2 BF16 SUM-pool (widen->f64 separable->round). The running-sum's ~1e-13 f64 reassociation is
+    // far below bf16's ~1e-2 resolution, so the rounded output matches the naive (f64-fold -> bf16-round).
+    #[test]
+    fn bf16_rank2_sumpool_matches_naive() {
+        use fj_core::DType;
+        let (rows, cols) = (36usize, 40usize);
+        // bf16-representable values via truncating f32->bf16.
+        let bits: Vec<u16> = (0..rows * cols)
+            .map(|i| {
+                let v = (((i * 31 + 7) % 211) as f32) * 0.05 - 5.0;
+                (v.to_bits() >> 16) as u16
+            })
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                bits.clone(),
+            )
+            .unwrap(),
+        );
+        let (wr, wc) = (5usize, 5usize);
+        let mut p = std::collections::BTreeMap::new();
+        p.insert("reduce_op".to_owned(), "sum".to_owned());
+        p.insert("window_dimensions".to_owned(), format!("{wr},{wc}"));
+        p.insert("window_strides".to_owned(), "1,1".to_owned());
+        p.insert("padding".to_owned(), "VALID".to_owned());
+        let got = match eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&tensor), &p)
+            .unwrap()
+        {
+            Value::Tensor(t) => t.elements.as_half_float_slice().unwrap().to_vec(),
+            _ => panic!(),
+        };
+        let decode = |b: u16| fj_core::Literal::BF16Bits(b).as_f64().unwrap();
+        let round = |v: f64| match super::reduce_window_literal_from_f64(DType::BF16, v) {
+            fj_core::Literal::BF16Bits(b) => b,
+            _ => 0,
+        };
+        let (out_rows, out_cols) = (rows - wr + 1, cols - wc + 1);
+        let mut want = Vec::with_capacity(out_rows * out_cols);
+        for orr in 0..out_rows {
+            for occ in 0..out_cols {
+                let mut acc = 0.0f64;
+                for dr in 0..wr {
+                    for dc in 0..wc {
+                        acc += decode(bits[(orr + dr) * cols + (occ + dc)]);
+                    }
+                }
+                want.push(round(acc));
+            }
+        }
+        assert_eq!(
+            got, want,
+            "bf16 rank-2 sumpool diverges from naive f64-fold->round"
+        );
     }
 
     // U32 rank-2 maxpool/minpool (routes u32 -> i64 van Herk -> u32) must match the naive u32 fold,
