@@ -1693,7 +1693,13 @@ fn broadcast_replicate_into<T: Copy + Send + Sync>(
             }
             base
         };
-        let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && outer_total >= 2 {
+        // A replicated-axis broadcast writes a FRESH output with no input re-read, so it
+        // is FIRST-TOUCH-PAGE-FAULT bound (measured ~1.8 GB/s serial, far below DRAM
+        // bandwidth), NOT steady-state-bandwidth bound. Page faults parallelize across
+        // cores, so this threads at a LOWER gate than the read-modify-write cheap-binary
+        // path (`CHEAP_BINARY_PARALLEL_MIN`). Bit-identical (each outer block is disjoint).
+        const BROADCAST_FILL_PARALLEL_MIN: usize = 1 << 20;
+        let threads = if total >= BROADCAST_FILL_PARALLEL_MIN && outer_total >= 2 {
             bw_bound_threads(total).min(outer_total)
         } else {
             1

@@ -25,6 +25,24 @@ peephole (mirrors existing `try_eval_top_level_scan_*` in fj-interpreters lib.rs
 on resolving softmax parity as TOLERANCE (softmax_2d's scalar `fold(f64::max)`/`+=` differ from fj-lax
 SIMD reduce_max/sum on +/-0 and NaN, so it is NOT a bit-identical drop-in for the decomposed path).
 
+## 2026-07-02 - WIN: thread the BroadcastInDim replicated-axis fill — page-fault-bound, 2.83x more (6.3x total vs odometer) (TealMarten)
+
+Follow-up to the replicated-axis FILL fast-path. The fill was gated serial at
+`CHEAP_BINARY_PARALLEL_MIN` (1<<23=8.4M), so the common 4M reduce-re-expand
+(`[4096]->[4096,1024]` softmax/layernorm denominator) ran single-threaded = 18.2ms.
+KEY INSIGHT: a replicated-axis broadcast writes a FRESH output with NO input re-read,
+so it is FIRST-TOUCH-PAGE-FAULT bound (18.2ms/32MB = ~1.8 GB/s, far below DRAM
+bandwidth), NOT steady-state-bandwidth bound. Page faults parallelize across cores, so
+this is a DIFFERENT regime from the read-modify-write cheap-binary ops the 8.4M gate
+protects — the documented "memory-bound threading regresses" caveat does NOT apply.
+Added a fill-specific gate `BROADCAST_FILL_PARALLEL_MIN = 1<<20`. MEASURED
+`nn/softmax_step_broadcast` (interleaved, 3 back-to-back runs = **6.42 / 6.40 / 6.43ms**
+— ROCK-solid, not contention-flaky) = **2.83x over serial 18.2ms, 6.3x over the original
+40ms odometer**. Bit-identical (disjoint outer blocks; 48 broadcast tests + bit-identity
+test pass). LESSON: distinguish first-touch-page-fault-bound (threads cleanly, stable A/B)
+from steady-state-bandwidth-bound (threads flaky/regresses) — write-only fills are the
+former; the blanket "don't thread memory-bound" rule over-generalizes.
+
 ## 2026-07-02 - WIN (recorded at scale): fj sort/argsort 4M f64 are 6.1x / 4.3x FASTER than JAX (TealMarten)
 
 Non-softmax primitive sweep vs JAX 0.10.2 x64 (jaxvenv, `prim_sweep.py`) to find the biggest non-FFT gap:
