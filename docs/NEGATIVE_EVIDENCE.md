@@ -62,6 +62,22 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - WIN (recorded): fj cumsum-axis1 1.55x + cummax 2.0x FASTER than JAX (TealMarten)
+
+Data-dependent op sweep vs JAX 0.10.2 x64 (jaxvenv, `ddep_sweep.py`) surfaced cumulative scans as fj
+wins (JAX median/percentile 4M = ~1002ms via full sort is pathological but jnp-level, not an fj
+primitive — noted, not reachable). Measured at scale (new `eval/cumsum_axis1_4096x1024_f64`,
+`eval/cummax_4m_f64`):
+- **cumsum axis1 4096x1024 f64: fj 7.88ms vs JAX 12.19ms = 1.55x FASTER** — fj threads the 4096
+  independent row-scans (`scan_contiguous_lines_to_vec`, gate 262K, bit-identical per line).
+- **cummax 4M f64: fj 7.91ms vs JAX 15.88ms = 2.0x FASTER** — 1D cummax uses fj's associative all-cores
+  parallel-prefix (`parallel_cummax_f64`, bit-identical fwd/rev incl NaN).
+Both already-shipped kernels; this RECORDS the vs-JAX ratios at production scale + pins them with benches.
+Adds to the order-statistics/scan domination map (sort 6.1x, argsort 4.3x, argmax 1.76x). Note: 1D float
+cumsum is NOT here — it's memory-bound + worker-confounded (see cumsum-worker-confound ledger); the WINS
+are the ROW-PARALLEL (axis1, independent lines) and ASSOCIATIVE (cummax) cases, which parallelize
+cleanly unlike the serial 1D float prefix.
+
 ## 2026-07-02 - WIN (argmax) + NO-SHIP (threaded max/min reduce regresses) at 4M full-reduce (TealMarten)
 
 Benched fj full-reduce 4M f64 vs JAX 0.10.2 x64 (jaxvenv, new `eval/{reduce_sum,reduce_max,argmax}_4m_f64`):
