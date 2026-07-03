@@ -173,6 +173,10 @@ fn bench_random_4m_vs_jax(c: &mut Criterion) {
     c.bench_function("random/normal_4m_f64_vsjax", |b| {
         b.iter(|| black_box(random_normal(key, n)));
     });
+    // randint: JAX 0.10.2 x64 4M = 100.5ms (slow); fj threaded threefry two-word randint.
+    c.bench_function("random/randint_4m_vsjax", |b| {
+        b.iter(|| black_box(fj_lax::threefry::random_randint(key, n, 0, 1000)));
+    });
 }
 
 fn bench_add_scalar(c: &mut Criterion) {

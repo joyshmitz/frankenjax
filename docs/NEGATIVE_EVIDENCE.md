@@ -146,7 +146,10 @@ normal 54.3ms). fj threads counter-based threefry bit-identically (new benches
 - **normal 4M f64: fj 43.5ms vs JAX 54.3ms = 1.25x FASTER** — marginal: normal is dominated by the
   per-element `erf_inv` Newton solve (compute-bound scalar), not the threefry, so threading the bit-gen
   helps little. NOT a headline; recorded for honesty.
-Uniform/randint-class (mantissa-fill from threefry bits) is the RNG win; normal/gumbel/laplace are
+- **randint 4M: fj 48.05ms vs JAX 100.5ms = 2.1x FASTER** (`random/randint_4m_vsjax`) — modest: the
+  two-word rejection algo (JAX-source-exact) is heavier per element than uniform's mantissa-fill, so less
+  than uniform's 8.5x, but still a clean threaded-threefry win.
+Uniform is the big RNG win; randint modest; normal/gumbel/laplace are
 gated by their transcendental transform. Threading-based here (fj threads, JAX's CPU threefry doesn't
 parallelize as well), so uniform's 8.5x may vary with host contention — but it held clean at measure time.
 
