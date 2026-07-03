@@ -46,6 +46,21 @@ transpose-sort, but transpose tiling is memory-flagged DO-NOT (`transpose_alread
 all regimes). Genuine hard gap: any axis-0 sort must touch data with column-stride. Benches kept as markers.
 DO-NOT re-attempt the naive strided column-gather; the lever is a blocked transpose (separately gated) or nothing.
 
+## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): explicit f64x8 SIMD rsqrt/sqrt is a NO-WIN — scalar already autovectorizes (TealMarten)
+
+`eval_rsqrt` had native-f32 SIMD but f64 rsqrt fell to the generic scalar map `eval_float_complex_unary(|x|
+1.0/x.sqrt())` — looked like the pooling/transcendental dtype-sibling gap (rsqrt = the LayerNorm/RMSNorm
+normalizer). Added a native-f64 `rsqrt_f64x8` (bit-identical: `Simd::sqrt` == hardware `vsqrtpd`, IEEE
+divide). A/B via `FJ_RSQRT_SCALAR` (`eval/rsqrt_8m_f64`): 8M f64 SIMD 14.69ms vs scalar 14.52ms (parity,
+BW-bound); **64K (L2-resident, compute-bound) SIMD 229us vs scalar 56us = 4x SLOWER**. Two lessons:
+(1) the scalar `1.0/x.sqrt()` ALREADY AUTOVECTORIZES — sqrt+div are single hardware instructions LLVM
+lowers to `vsqrtpd`+`vdivpd` (56us/64K = 0.84ns/elem is clearly vectorized), UNLIKE the opaque libm
+`exp`/`log`/`erf` calls that genuinely need hand-written SIMD (that's why exp/log SIMD wins but sqrt does
+not). (2) routing through the threaded f64-unary helper added thread-spawn overhead that dominates small
+(cache-resident) sizes. REVERTED; left a DO-NOT comment + kept the bench as a marker. DO-NOT hand-SIMD
+any op whose scalar form is branch-free hardware instructions (sqrt/rsqrt/abs/neg/round/min/max/floor/
+ceil) — the autovectorizer already covers them; hand-SIMD only opaque libm calls.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): scalar dense bf16/f16 associative_scan REGRESSES the batched case 2.9x (TealMarten)
 
 `eval_associative_scan` has a dense typed-buffer fast path for f64/f32/i64/i32 but half (bf16/f16) falls to

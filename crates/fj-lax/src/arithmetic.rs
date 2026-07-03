@@ -14186,6 +14186,11 @@ pub(crate) fn eval_rsqrt(primitive: Primitive, inputs: &[Value]) -> Result<Value
     {
         return v;
     }
+    // NOTE (2026-07-03, TealMarten): tried a native-f64 8-wide SIMD rsqrt here. It was a NO-WIN and a
+    // regression: the scalar `1.0/x.sqrt()` already AUTOVECTORIZES (LLVM lowers sqrt+div to vsqrtpd+vdivpd,
+    // unlike the opaque libm exp/log calls that need explicit SIMD), so at 64K f64 the generic path is
+    // ~56us while the explicit-SIMD + threading path was ~229us (4x SLOWER, thread-spawn overhead), and at
+    // 8M both are ~14.6ms (BW-bound). DO-NOT add explicit SIMD for sqrt/rsqrt — the compiler already does it.
     // f64 / complex / integer-rejection / tail via the generic float-complex path.
     eval_float_complex_unary(primitive, inputs, |x| 1.0 / x.sqrt())
 }

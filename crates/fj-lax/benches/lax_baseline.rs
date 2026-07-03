@@ -3464,6 +3464,28 @@ fn bench_assoc_scan_bf16_batched(c: &mut Criterion) {
     });
 }
 
+// f64 rsqrt (LayerNorm/RMSNorm normalizer), 64K (L2-resident, compute-bound). Marker: the scalar
+// `1.0/x.sqrt()` generic path ALREADY autovectorizes (~56us = 0.84ns/elem); an explicit f64x8 SIMD +
+// threading path was 4x SLOWER here (see NEGATIVE_EVIDENCE 2026-07-03). DO-NOT add explicit SIMD sqrt/rsqrt.
+fn bench_rsqrt_8m_f64(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1usize << 16)
+        .map(|i| 1.0 + (i % 9973) as f64 * 1e-3)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![data.len() as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let p = BTreeMap::new();
+    c.bench_function("eval/rsqrt_8m_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Rsqrt, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_sort_64k_i64(c: &mut Criterion) {
     let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_003) - 500_000)
@@ -8490,6 +8512,7 @@ criterion_group!(
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_assoc_scan_bf16_batched,
+    bench_rsqrt_8m_f64,
     bench_sort_argsort_4m_f64,
     bench_half_f32_sort_vs_jax,
     bench_complex_sort_4m_vsjax,
