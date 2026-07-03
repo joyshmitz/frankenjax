@@ -3506,6 +3506,55 @@ fn bench_sort_argsort_4m_f64(c: &mut Criterion) {
 // serial. max/min/argmax are ASSOCIATIVE (bit-exact under reordering), so threading a
 // DRAM-bound (32MB > L3) read-only reduce is legal and lets multi-core read exceed
 // single-core bandwidth. Isolates whether the serial full-reduce loses to JAX at 4M.
+// f32 + bf16 sort vs JAX 0.10.2 x64 (jaxvenv, 2026-07-03): JAX full-sorts them —
+// bf16 sort 4M = 1054ms, bf16 argsort = 1312ms, f32 sort = 999.6ms. fj uses radix
+// (f32 total_cmp-bit key; bf16 per-block half radix). bf16 is THE ML dtype.
+fn bench_half_f32_sort_vs_jax(c: &mut Criterion) {
+    let n = 1usize << 22;
+    let f32data: Vec<f32> = (0..n)
+        .map(|i| ((i as f32) * 1.000_173).sin() * 1e6 - (i as f32))
+        .collect();
+    let f32in = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            f32data,
+        )
+        .unwrap(),
+    );
+    let bf16bits: Vec<u16> = (0..n)
+        .map(
+            |i| match Literal::from_bf16_f64(((i as f64) * 1.000_173).sin() * 1e6 - (i as f64)) {
+                Literal::BF16Bits(b) => b,
+                _ => 0,
+            },
+        )
+        .collect();
+    let bf16in = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape {
+                dims: vec![n as u32],
+            },
+            bf16bits,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_4m_f32_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&f32in), &p))
+    });
+    c.bench_function("eval/sort_4m_bf16_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&bf16in), &p))
+    });
+    c.bench_function("eval/argsort_4m_bf16_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Argsort, std::slice::from_ref(&bf16in), &p))
+    });
+}
+
 fn bench_full_reduce_4m_f64(c: &mut Criterion) {
     let n = 1usize << 22;
     let data: Vec<f64> = (0..n).map(|i| ((i as f64) * 1.000_173).sin()).collect();
@@ -8126,6 +8175,7 @@ criterion_group!(
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_argsort_4m_f64,
+    bench_half_f32_sort_vs_jax,
     bench_full_reduce_4m_f64,
     bench_sort2d_vs_jax,
     bench_cumulative_vs_jax,

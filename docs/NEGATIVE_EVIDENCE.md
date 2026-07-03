@@ -213,6 +213,18 @@ CPU path is iterative; fj's direct tridiag/Householder algorithms dominate. Adds
 to the domination map (order-statistics 6-205x + eigh/qr 5-16x); both are ALGORITHM wins (fj picks the
 better method), threading-independent.
 
+## 2026-07-03 - WIN (recorded): fj f32/bf16 sort 6.9-13.9x FASTER than JAX (the ML dtypes) (TealMarten)
+
+Extended the sort domination to the ML training/inference dtypes. JAX full-sorts them (4M): bf16 sort =
+1054ms, bf16 argsort = 1312ms, f32 sort = 999.6ms. fj radix (new benches `eval/sort_4m_f32_vsjax`,
+`eval/{sort,argsort}_4m_bf16_vsjax`):
+- **f32 sort 4M: fj 72.1ms vs JAX 999.6ms = 13.9x FASTER** (even better than f64's 6.1x — 4-byte
+  total_cmp-bit key = fewer radix passes than 8-byte f64).
+- **bf16 sort 4M: fj 151.9ms vs JAX 1054ms = 6.9x**; **bf16 argsort: fj 165.9ms vs 1312ms = 7.9x** (bf16
+  uses per-block half radix recursion — heavier than f32's flat radix, but still crushes JAX's full sort).
+Sort domination now spans f64/f32/bf16 (6-14x) + 2D per-row (31-42x) + i64 — every dtype/shape where JAX
+full-sorts. bf16/f32 are THE ML dtypes (attention scores, top-k sampling), so these are high-relevance.
+
 ## 2026-07-02 - WIN (recorded, BIG): fj 2D per-row/column sort 31-42x FASTER than JAX (TealMarten)
 
 Sibling of the top_k win: JAX full-sorts each row/column of a matrix. JAX 0.10.2 x64 4096x1024:
