@@ -114,6 +114,22 @@ feature_group_count interaction — needs a dedicated session with the conv orac
 regression/target marker (2.04ms JAX target). This is the biggest contained non-FFT non-FMA gap now on
 record after pooling/atan2 were mined.
 
+## 2026-07-03 - DECOMPOSED (de-risks polyphase): conv_transpose 8.6ms = 0.79ms dilate + 5.4ms conv-on-zeros; polyphase ceiling ~1.35ms BEATS JAX 2.04ms (TealMarten)
+
+Rather than rush the multi-session polyphase rewrite mid-loop, MEASURED where the conv_transpose time goes,
+to de-risk + quantify it (new `bench_conv_transpose_decompose_f64`, same [1,64,64,16]*[3,3,16,32] lhsdil2
+f64 shape). Same-invocation min-of-6: **full=8.59ms, dilate-materialization=0.79ms (only ~9%), plain conv
+over the 4x-larger dilated input=5.42ms (the bulk).** Two decisive findings for the future implementer:
+  1. The zero-dilate MATERIALIZATION is CHEAP (0.79ms) — do NOT spend effort avoiding it; a "skip the
+     dilated buffer" micro-opt buys < 10%. The entire waste is the conv MULTIPLYING BY ZEROS.
+  2. The conv-on-dilated is 4x (= s^2) the useful work. Polyphase replaces it with s^2 sub-convs of 1/s^2
+     the size = ~conv_on_dilated / 4 = **1.35ms**, which is BELOW JAX's 2.04ms. So the polyphase rewrite is
+     not merely gap-closing — it would make fj conv_transpose ~1.5x FASTER than JAX (and ~6x its current
+     self). This confirms the lever is worth a dedicated session and sets a concrete 1.35ms target.
+  (Aside: full 8.59ms > dilate 0.79 + conv 5.42 = 6.2ms; the ~2.4ms residual is the recursion's param-clone
+  + Value/tensor construction + a second im2col build — a separate smaller ~28% overhead lever, secondary to
+  the zero-multiply waste.) Bench committed as a permanent marker; no production code changed this pass.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT): native-f64 SIMD tan is a NO-WIN — glibc tan too fast (both approaches tried) (TealMarten)
 
 UPDATE: the filed single-reduction lever was executed and ALSO failed. First a sin/cos-RATIO tan = 1.10x

@@ -21827,6 +21827,80 @@ mod tests {
         );
     }
 
+    // Decompose the conv_transpose (lhs_dilation=2) time into (a) the zero-dilate materialization and
+    // (b) the plain conv over the 4x-larger dilated input, to quantify the polyphase ceiling. The
+    // polyphase rewrite would replace the s^2 zero-multiply conv with s^2 sub-convs of 1/s^2 the size
+    // (same total useful MACs as ONE undilated conv over the s^2 outputs, i.e. ~conv_on_dilated / s^2),
+    // so `conv_on_dilated / 4` is the achievable-time floor for this 2D stride-2 case. Marker for the
+    // future polyphase work; JAX direct conv_transpose = 2.04ms on this shape.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_conv_transpose_decompose_f64() {
+        use std::time::Instant;
+        let (n, h, w, cin, kh, kw, cout) = (1usize, 64, 64, 16, 3, 3, 32);
+        let lhs_v: Vec<f64> = (0..n * h * w * cin)
+            .map(|i| ((i as f64) * 0.013).sin())
+            .collect();
+        let rhs_v: Vec<f64> = (0..kh * kw * cin * cout)
+            .map(|i| ((i as f64) * 0.017).cos())
+            .collect();
+        let lhs = TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32, h as u32, w as u32, cin as u32],
+            },
+            lhs_v,
+        )
+        .unwrap();
+        let rhs = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![kh as u32, kw as u32, cin as u32, cout as u32],
+                },
+                rhs_v,
+            )
+            .unwrap(),
+        );
+        let mut p = BTreeMap::new();
+        p.insert("padding".to_owned(), "same".to_owned());
+        p.insert("strides".to_owned(), "1".to_owned());
+        p.insert("lhs_dilation".to_owned(), "2,2".to_owned());
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let lhs_val = Value::Tensor(lhs.clone());
+        let full = best(&|| {
+            std::hint::black_box(
+                eval_conv(Primitive::Conv, &[lhs_val.clone(), rhs.clone()], &p).unwrap(),
+            );
+        });
+        let dils = [2usize, 2];
+        let dilate_only = best(&|| {
+            std::hint::black_box(dilate_conv_lhs(Primitive::Conv, &lhs, &dils).unwrap());
+        });
+        let dilated_val = Value::Tensor(dilate_conv_lhs(Primitive::Conv, &lhs, &dils).unwrap());
+        let mut p2 = p.clone();
+        p2.remove("lhs_dilation");
+        let conv_on_dilated = best(&|| {
+            std::hint::black_box(
+                eval_conv(Primitive::Conv, &[dilated_val.clone(), rhs.clone()], &p2).unwrap(),
+            );
+        });
+        println!(
+            "[conv_transpose-decompose 64x64x16 lhsdil2 f64] full={:.3}ms dilate={:.3}ms conv_on_dilated={:.3}ms | polyphase_ceiling~={:.3}ms (conv/4) | JAX=2.04ms",
+            full * 1e3,
+            dilate_only * 1e3,
+            conv_on_dilated * 1e3,
+            conv_on_dilated * 1e3 / 4.0,
+        );
+    }
+
     #[test]
     fn conv_lhs_dilation_matches_explicitly_dilated_input() {
         // lhs_dilation (transposed conv): inserting (L-1) zeros between input elements
