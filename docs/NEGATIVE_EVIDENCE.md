@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): multi-accumulator ILP does NOT speed up SIMD reduce_max/min — already BW-bound (TealMarten)
+
+The ledger recorded reduce_max 4M f64 = 2.46ms vs JAX 0.71ms = 3.5x. Two findings: (1) that 2.46ms was
+STALE/contended — a clean re-measure gives eval_primitive ReduceMax 4M f64 = **1.41ms** (dispatch overhead
+is only ~0.2ms over the kernel), so vs JAX 0.71ms it's ~2x, not 3.5x. (2) `simd_reduce_minmax_f64/f32` use
+a SINGLE 8/16-lane accumulator (a latency-bound dependency chain in theory). Tried **4 INDEPENDENT
+accumulators** (STEP 32/64) to expose ILP toward memory bandwidth. Same-invocation A/B at 4M across 5 runs:
+1.22x, 1.09x, 1.18x, 0.98x, 1.10x — **straddles 1.0 (one run 4-acc SLOWER); it is NOISE**. Root cause: this
+reduce is ALREADY single-thread memory-BW-bound with one accumulator (32MB / 1.2ms ≈ 27 GB/s ≈ the Zen3
+single-core BW ceiling; the simd_max latency hides under the load latency), so more ILP has nothing to buy.
+REVERTED the kernel change; left a DO-NOT comment in both fns. The residual ~2x JAX gap is JAX threading
+across cores for higher AGGREGATE bandwidth — fj's reduce threading is gated at 8.4M (`CHEAP_BINARY_
+PARALLEL_MIN`) and is contention-sensitive (memory rule: don't ship threading off one uncontended bench).
+DO-NOT re-attempt multi-accumulator reduce ILP; the lever is threading/gate-tuning, not kernel ILP.
+
 ## 2026-07-03 - NEGATIVE/BOUNDARY: f64 erf/lgamma/digamma/bessel_i0e are FMA-gated LOSSES (2.4-3x slower than JAX) — refines the special-fn win/loss split (TealMarten)
 
 Measured fj f64 special functions 4M vs JAX 0.10.2 x64 (new benches `eval/{erf,lgamma,digamma,bessel_i0e}

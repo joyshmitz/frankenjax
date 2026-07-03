@@ -135,6 +135,10 @@ fn simd_reduce_minmax_f64(values: &[f64], is_max: bool) -> f64 {
 
     let mut vacc = Simd::<f64, LANES>::splat(init);
     // SIMD-mask NaN accumulate (one `.any()` at the end) — see simd_reduce_minmax_f32. Bit-identical.
+    // NOTE (2026-07-03, TealMarten): tried 4 INDEPENDENT accumulators to break this dependency chain —
+    // measured 0.98-1.22x at 4M (straddles 1.0, NOISE). This reduce is already single-thread memory-BW-
+    // bound at one accumulator (the simd_max latency hides under the load latency), so extra ILP does not
+    // help. DO-NOT re-attempt multi-accumulator reduce ILP; the 2x JAX gap is multi-core aggregate BW.
     let mut nan_acc = vacc.is_nan();
     let chunks = values.chunks_exact(LANES);
     let tail = chunks.remainder();
@@ -193,6 +197,7 @@ fn simd_reduce_minmax_f32(values: &[f32], is_max: bool) -> f32 {
     let mut vacc = Simd::<f32, LANES>::splat(init);
     // Accumulate NaN detection as a SIMD MASK (one `.any()` at the end) instead of a horizontal
     // `.any()` per chunk — the per-chunk reduction was ~half the per-row cost. Bit-identical.
+    // (Multi-accumulator ILP not used — see the note in simd_reduce_minmax_f64: BW-bound, no gain.)
     let mut nan_acc = vacc.is_nan(); // all-false (init is finite)
     let chunks = values.chunks_exact(LANES);
     let tail = chunks.remainder();
