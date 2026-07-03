@@ -46,6 +46,21 @@ transpose-sort, but transpose tiling is memory-flagged DO-NOT (`transpose_alread
 all regimes). Genuine hard gap: any axis-0 sort must touch data with column-stride. Benches kept as markers.
 DO-NOT re-attempt the naive strided column-gather; the lever is a blocked transpose (separately gated) or nothing.
 
+## 2026-07-03 - WIRED WIN (1.5-1.9x): native-f64 SIMD atan2 (opaque libm → f64x8 poly) (TealMarten)
+
+Applied the rsqrt lesson (hand-SIMD ONLY opaque libm calls, not autovectorizable hardware ops) to find a
+REAL win. `eval_atan2` had a native-f32 SIMD path but **f64 atan2 fell to the scalar `f64::atan2`** — an
+OPAQUE libm call (does NOT autovectorize), so a SIMD poly wins (unlike sqrt/rsqrt). `atan_f64x8` already
+ships for unary atan (so no `+fma` needed — the old "atan2 is FMA-blocked" note was STALE). Added
+`atan2_f64x8` (mirror of `atan2_f32x8`: `atan(y/x)` + `copysign(π,y)` quadrant, non-finite/x==0 lanes to
+scalar `f64::atan2`) + `eval_binary_simd_dense_f64_native` (f64 sibling of the f32 binary driver) + wired
+`eval_atan2_f64_native` after the f32 path. Same-invocation A/B (`eval/atan2_8m_f64`, `FJ_ATAN2_SCALAR`):
+scalar 105-126ms → SIMD 66-70ms = **1.5-1.9x** (load 62-70; both threaded so both contend). Tolerance
+parity: new `atan2_f64_native_matches_libm` asserts maxerr < 1e-9 vs libm over all quadrants + x=0/±inf/NaN
+edges (JAX atan2 is XLA's own poly, so atan2 is tolerance not bit-exact anyway). Gated to same-shape
+(F64,F64) above the threading threshold; scalar-broadcast + small tensors stay on the scalar path (so the
+conformance oracle's small-tensor cases are unchanged). full fj-lax lib 1731/0.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): explicit f64x8 SIMD rsqrt/sqrt is a NO-WIN — scalar already autovectorizes (TealMarten)
 
 `eval_rsqrt` had native-f32 SIMD but f64 rsqrt fell to the generic scalar map `eval_float_complex_unary(|x|

@@ -6848,6 +6848,60 @@ fn eval_binary_simd_dense_f32_native(
         .map(Value::Tensor)
 }
 
+/// Threaded dense same-shape f64 binary SIMD driver — the f64 sibling of
+/// [`eval_binary_simd_dense_f32_native`]. Both operands dense-F64, equal length; each 8-lane block
+/// through `kernel`, the `len % 8` tail through `scalar`. Used by native-f64 `Atan2` (an opaque libm
+/// call that does NOT autovectorize, unlike sqrt). Threaded==serial value-identity holds (lanes are
+/// independent and the tail uses the same `scalar`), so it stays out of the pinned expensive-parallel path.
+fn eval_binary_simd_dense_f64_native(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    kernel: impl Fn(std::simd::Simd<f64, 8>, std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> + Sync,
+    scalar: fn(f64, f64) -> f64,
+) -> Option<Value> {
+    use std::simd::Simd;
+    if lhs.dtype != DType::F64 || rhs.dtype != DType::F64 || lhs.shape != rhs.shape {
+        return None;
+    }
+    let (a, b) = (lhs.elements.as_f64_slice()?, rhs.elements.as_f64_slice()?);
+    let n = a.len();
+    let threads = dense_unary_threads(n);
+    if threads <= 1 {
+        return None;
+    }
+    let mut out = vec![0.0f64; n];
+    let chunk = n.div_ceil(threads);
+    let kref = &kernel;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                let (ca, cb) = (&a[s..s + len], &b[s..s + len]);
+                let n8 = len - len % 8;
+                let mut i = 0;
+                while i < n8 {
+                    let xv = Simd::<f64, 8>::from_slice(&ca[i..i + 8]);
+                    let yv = Simd::<f64, 8>::from_slice(&cb[i..i + 8]);
+                    kref(xv, yv).copy_to_slice(&mut blk[i..i + 8]);
+                    i += 8;
+                }
+                for j in i..len {
+                    blk[j] = scalar(ca[j], cb[j]);
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_f64_values(lhs.shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
+}
+
 /// Native-f32 same-shape `Pow` fast path (JAX's default dtype): `exp(y·log x)` in f32, ~1.3x the
 /// widen-to-f64 `f64::powf` path (which reads BOTH f32 tensors as f64 — the native SIMD path halves
 /// that traffic + work). Only the same-shape `(F32,F32)` case: the `x^c` scalar-exponent widen path
@@ -6873,6 +6927,22 @@ pub(crate) fn eval_atan2_f32_native(inputs: &[Value]) -> Option<Value> {
     }
     if let [Value::Tensor(lhs), Value::Tensor(rhs)] = inputs {
         return eval_binary_simd_dense_f32_native(lhs, rhs, atan2_f32x8, f32::atan2);
+    }
+    None
+}
+
+/// Native-f64 same-shape `Atan2` fast path: `atan(y/x)` + quadrant in f64 via [`atan_f64x8`], replacing
+/// the per-element scalar `f64::atan2` (an OPAQUE libm call that does NOT autovectorize). `atan_f64x8`
+/// already ships for unary `atan` (so this needs no `+fma` — the earlier "atan2 is FMA-blocked" note was
+/// stale). Non-finite / `x==0` lanes fall to scalar `f64::atan2` (exact). `inputs[0]=y`, `inputs[1]=x`.
+/// Tolerance parity (JAX atan2 is XLA's own poly, not libm); `None` for non-(F64,F64) / sub-threshold /
+/// `FJ_ATAN2_SCALAR`.
+pub(crate) fn eval_atan2_f64_native(inputs: &[Value]) -> Option<Value> {
+    if std::env::var_os("FJ_ATAN2_SCALAR").is_some() {
+        return None;
+    }
+    if let [Value::Tensor(lhs), Value::Tensor(rhs)] = inputs {
+        return eval_binary_simd_dense_f64_native(lhs, rhs, atan2_f64x8, f64::atan2);
     }
     None
 }
@@ -8033,6 +8103,38 @@ fn atan2_f32x8(y: std::simd::Simd<f32, 8>, x: std::simd::Simd<f32, 8>) -> std::s
     let signbit = U::splat(0x8000_0000);
     let pi_signed = F::from_bits(
         (F::splat(std::f32::consts::PI).to_bits() & !signbit) | (y.to_bits() & signbit),
+    );
+    let adj = x.simd_lt(F::splat(0.0)).select(pi_signed, F::splat(0.0));
+    let mut r = base + adj;
+    if !ok.all() {
+        let ya = y.to_array();
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].is_finite() && ya[k].is_finite() && xa[k] != 0.0) {
+                ra[k] = ya[k].atan2(xa[k]);
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+/// NATIVE-f64 `atan2(y, x) = atan(y/x)` + quadrant, the f64 sibling of [`atan2_f32x8`] on [`atan_f64x8`].
+/// For `x < 0`, add `copysign(π, y)` (+π 2nd quadrant, −π 3rd). Non-finite / `x==0` lanes recompute with
+/// scalar `f64::atan2` (bit-exact there). ~f64 atan tolerance (same poly as the shipped unary `atan`).
+fn atan2_f64x8(y: std::simd::Simd<f64, 8>, x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    type U = Simd<u64, 8>;
+    let ok = x.is_finite() & y.is_finite() & x.simd_ne(F::splat(0.0));
+    let base = atan_f64x8(y / x);
+    let signbit = U::splat(0x8000_0000_0000_0000);
+    let pi_signed = F::from_bits(
+        (F::splat(std::f64::consts::PI).to_bits() & !signbit) | (y.to_bits() & signbit),
     );
     let adj = x.simd_lt(F::splat(0.0)).select(pi_signed, F::splat(0.0));
     let mut r = base + adj;
@@ -19135,6 +19237,42 @@ mod tests {
             maxerr = maxerr.max((f64::from(out[i]) - want).abs());
         }
         assert!(maxerr < 3e-6, "atan2 f32 native maxerr={maxerr:e}");
+    }
+
+    #[test]
+    fn atan2_f64_native_matches_libm() {
+        // n above the threading threshold fires atan2_f64x8. All quadrants (x<0 flips) + x=0/±inf/NaN
+        // edges (scalar fallback, bit-exact there). Tolerance vs libm (same poly as the shipped unary atan).
+        let n = 2_000_000usize;
+        let ys: Vec<f64> = (0..n).map(|i| ((i % 1201) as f64) * 0.005 - 3.0).collect();
+        let xs: Vec<f64> = (0..n)
+            .map(|i| match i % 9 {
+                0 => 0.0,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => f64::NAN,
+                _ => ((i % 1301) as f64) * 0.005 - 3.25, // spans x<0 and x>0
+            })
+            .collect();
+        let sh = Shape {
+            dims: vec![n as u32],
+        };
+        let yt = Value::Tensor(TensorValue::new_f64_values(sh.clone(), ys.clone()).unwrap());
+        let xt = Value::Tensor(TensorValue::new_f64_values(sh.clone(), xs.clone()).unwrap());
+        let p = BTreeMap::new();
+        let got = crate::eval_primitive(Primitive::Atan2, &[yt, xt], &p).unwrap();
+        let out = got.as_tensor().unwrap().elements.as_f64_slice().unwrap();
+        let mut maxerr = 0.0f64;
+        for i in 0..n {
+            let want = ys[i].atan2(xs[i]);
+            if want.is_nan() {
+                assert!(out[i].is_nan(), "atan2 f64 NaN lane {i}");
+                continue;
+            }
+            maxerr = maxerr.max((out[i] - want).abs());
+        }
+        // f64 atan poly is ~1e-9 accurate (same kernel as the shipped unary atan).
+        assert!(maxerr < 1e-9, "atan2 f64 native maxerr={maxerr:e}");
     }
 
     // atan2 f32 vs JAX (measured JAX 0.10.x CPU f32 16M = 31.6ms — under-parallelized like atan).

@@ -495,6 +495,9 @@ fn eval_primitive_inner(
             // Native-f32 same-shape fast path (JAX default dtype): ~2x the widen-to-f64 path.
             if let Some(v) = crate::arithmetic::eval_atan2_f32_native(inputs) {
                 Ok(v)
+            } else if let Some(v) = crate::arithmetic::eval_atan2_f64_native(inputs) {
+                // Native-f64 SIMD (atan2_f64x8) — f64::atan2 is opaque libm (no autovec).
+                Ok(v)
             } else {
                 eval_binary_elementwise(
                     primitive,

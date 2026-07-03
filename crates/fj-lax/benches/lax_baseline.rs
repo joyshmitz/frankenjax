@@ -3486,6 +3486,23 @@ fn bench_rsqrt_8m_f64(c: &mut Criterion) {
     });
 }
 
+// f64 atan2 (angle/phase; complex arg) — native-f64 SIMD (atan2_f64x8) vs the scalar libm map
+// (env-toggle FJ_ATAN2_SCALAR for the A/B). f64::atan2 is an opaque libm call (no autovec), unlike sqrt.
+fn bench_atan2_8m_f64(c: &mut Criterion) {
+    let n = 1usize << 23;
+    let ys: Vec<f64> = (0..n).map(|i| (i % 60000) as f64 * 0.0001 - 3.0).collect();
+    let xs: Vec<f64> = (0..n).map(|i| (i % 47000) as f64 * 0.0001 - 2.3).collect();
+    let sh = Shape {
+        dims: vec![n as u32],
+    };
+    let yt = Value::Tensor(TensorValue::new_f64_values(sh.clone(), ys).unwrap());
+    let xt = Value::Tensor(TensorValue::new_f64_values(sh, xs).unwrap());
+    let p = BTreeMap::new();
+    c.bench_function("eval/atan2_8m_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Atan2, &[yt.clone(), xt.clone()], &p))
+    });
+}
+
 fn bench_sort_64k_i64(c: &mut Criterion) {
     let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_003) - 500_000)
@@ -8513,6 +8530,7 @@ criterion_group!(
     bench_sort_64k_i64,
     bench_assoc_scan_bf16_batched,
     bench_rsqrt_8m_f64,
+    bench_atan2_8m_f64,
     bench_sort_argsort_4m_f64,
     bench_half_f32_sort_vs_jax,
     bench_complex_sort_4m_vsjax,
