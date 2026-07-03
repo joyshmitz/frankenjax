@@ -314,8 +314,16 @@ COVERED for large windows; my "rank-2 sum has no separable path" was wrong. ACCU
   "threading-wins-unmeasurable-on-contended-host" caveat; could even regress under load). Reverted per
   policy (don't ship threading off a single contended-host bench). The REAL fix is ALGORITHMIC: a rank-2
   separable-max (van-Herk row-then-column, O(input) not O(out·win²), bit-exact since max is
-  order-independent, contention-INDEPENDENT) mirroring the existing 4D-NHWC van-Herk — a ~80-line kernel,
-  filed. Threading only masks; van-Herk removes the 49x redundant work.
+  order-independent, contention-INDEPENDENT) mirroring the existing 4D-NHWC van-Herk. IMPLEMENTED + TESTED
+  it (2026-07-03, bit-identical: 48 reduce_window tests green, finite-gated plain-max like the 4D path,
+  row-major contiguous vertical pass) but it was STILL ~19ms = NO win, so REVERTED. ROOT CAUSE (the
+  non-obvious part): the van-Herk block prefix/suffix does a PER-ELEMENT modulo (`i % window_cols`) to
+  detect block boundaries; the 4D-NHWC van-Herk amortizes that modulo over 8+ CHANNELS per (h,w) position
+  (SIMD across c), but a rank-2 plain matrix has NO channel dim, so the modulo (a division/elem) runs once
+  per output and dominates — 6M modulo+max ops ≈ the naive 49M tight-loop max ops. FILED PRECISELY: a
+  BLOCK-STRUCTURED van-Herk (outer loop over blocks of `window`, inner contiguous loop within block — NO
+  per-element modulo) is what's needed; that removes the div/elem and should finally win. Deprioritized
+  (niche: rank-2 plain pooling; the 4D-NHWC CNN case is covered + fast).
 - **small-window SUM (<25 taps): deliberately gated out of separable** (separable overhead > naive fold
   for tiny windows), falls to the generic threaded cell loop = sumpool2d 3x3 17ms vs JAX 0.32ms. The
   generic loop is ~8x slower than it should be for 9 taps (per-cell odometer/interior overhead), but
