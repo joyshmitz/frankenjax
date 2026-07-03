@@ -46,7 +46,19 @@ transpose-sort, but transpose tiling is memory-flagged DO-NOT (`transpose_alread
 all regimes). Genuine hard gap: any axis-0 sort must touch data with column-stride. Benches kept as markers.
 DO-NOT re-attempt the naive strided column-gather; the lever is a blocked transpose (separately gated) or nothing.
 
-## 2026-07-03 - MARGINAL/FILED: native-f64 SIMD tan = sin/cos only 1.10x (double reduction); single-reduction filed (TealMarten)
+## 2026-07-03 - NEGATIVE (DO-NOT): native-f64 SIMD tan is a NO-WIN — glibc tan too fast (both approaches tried) (TealMarten)
+
+UPDATE: the filed single-reduction lever was executed and ALSO failed. First a sin/cos-RATIO tan = 1.10x
+(two reductions). Then the SINGLE-reduction tan_f64x8 (one `sincos_reduce_f64x8` → `sin_poly`+`cos_poly`
+ONCE each → octant swap/sign → divide; HALF the work, verified BIT-IDENTICAL to the ratio via an 8-lane
+assert) — still only **1.04x** at 2M (`eval/tan_2m_f64`, `FJ_TAN_SCALAR`, threads=2 so SIMD engaged).
+Root cause: glibc `f64::tan` is well-optimized (~9ns/elem, like glibc `ln`), so the SIMD reduction+2poly+div
+is not meaningfully cheaper per element, and 2M is partly BW-bound. CONCLUSION: tan is NOT a SIMD-winnable
+f64 target (unlike atan2, where glibc atan2 IS slow). Reverted both; kept the bench as a marker + a DO-NOT
+comment. This CLOSES the filed lever. Sharpened the filter's key predictor: it's not "opaque libm" per se —
+it's whether the SPECIFIC glibc fn is slow. atan2 slow (win); ln/tan/rsqrt fast (no-win).
+
+## (superseded) 2026-07-03 - MARGINAL/FILED: native-f64 SIMD tan = sin/cos only 1.10x (double reduction); single-reduction filed (TealMarten)
 
 f64 tan general range (|x|>π/4) falls to scalar `f64::tan`; f32 has SIMD (`tan_f32x8`). Fits the sharp
 filter (opaque libm, single-tensor compute-bound). Added `tan_f64x8 = sin_f64x8(x)/cos_f64x8(x)` (reuses

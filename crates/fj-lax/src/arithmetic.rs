@@ -7220,10 +7220,11 @@ pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         {
             return Ok(value);
         }
-        // NOTE (TealMarten 2026-07-03): a native-f64 SIMD tan = sin_f64x8/cos_f64x8 was only 1.10x over
-        // scalar f64::tan — the sin/cos RATIO does TWO argument reductions vs glibc tan's ONE, and glibc
-        // tan is well-optimized (~9ns/elem threaded). A single-reduction tan_f64x8 (one sincos_reduce_f64x8
-        // + both polys + divide) is the real lever (est. ~1.5-2x) — FILED, not done (octant logic + risk).
+        // DO-NOT (TealMarten 2026-07-03): both a sin/cos-RATIO tan (1.10x) AND a SINGLE-reduction tan_f64x8
+        // (one sincos_reduce + both polys + divide, HALF the work, bit-identical to the ratio) were tried —
+        // the single-reduction was still only 1.04x over scalar f64::tan. glibc tan is well-optimized (like
+        // glibc ln), so the SIMD reduction+poly+div isn't meaningfully cheaper per element, and it's partly
+        // BW-bound. tan is NOT a SIMD-winnable f64 target. DO-NOT re-attempt.
         eval_unary_elementwise_parallel(primitive, inputs, f64::tan)
     }
 }
