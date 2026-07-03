@@ -5230,6 +5230,37 @@ fn bench_pool_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/maxpool2d_1024x1024_w3s1_valid_f64", |b| {
         b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_max3))
     });
+    // i64 maxpool: w7 hits the scalar deque, w3 falls below the deque gate to naive — the whole integer
+    // rank-2 max/min family is on the slow path (no integer van Herk). Dense i64 input.
+    let mi64 = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![1024, 1024],
+            },
+            (0..1024 * 1024)
+                .map(|i| ((i * 2654435761u64) % 100003) as i64)
+                .collect(),
+        )
+        .unwrap(),
+    );
+    c.bench_function("eval/maxpool2d_1024x1024_w7s1_valid_i64", |b| {
+        b.iter(|| {
+            eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&mi64),
+                &p_max7,
+            )
+        })
+    });
+    c.bench_function("eval/maxpool2d_1024x1024_w3s1_valid_i64", |b| {
+        b.iter(|| {
+            eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&mi64),
+                &p_max3,
+            )
+        })
+    });
     let mut p_sum3 = BTreeMap::new();
     p_sum3.insert("reduce_op".to_owned(), "sum".to_owned());
     p_sum3.insert("window_dimensions".to_owned(), "3,3".to_owned());

@@ -5403,6 +5403,156 @@ fn separable_reduce_window_rank2_maxmin_f64(
     Some(output)
 }
 
+/// Integer sibling of [`separable_reduce_window_rank2_maxmin_f64`] — block-structured van Herk for rank-2
+/// i64/i32 max/min pooling. SIMPLER than the float path: integer max/min is a total order (no NaN, no ±0
+/// sign ambiguity), so it is BIT-EXACT with plain `Ord::max`/`min` and no scalar fallback. i32 tensors are
+/// i64-backed (sign-extended) and max/min SELECTS an in-range input value, so no mod-2^32 wrap is needed —
+/// the caller preserves the I32 dtype. OOB (padded) taps are the identity (i64::MIN for max / i64::MAX for
+/// min), matching the naive skip-OOB. stride 1 only; `window_rows*window_cols >= 9` gate (3x3+). Replaces
+/// both the scalar deque (large windows) and the naive fold (small windows) for the integer family.
+#[allow(clippy::too_many_arguments)]
+fn separable_reduce_window_rank2_maxmin_i64(
+    src: &[i64],
+    input_rows: usize,
+    input_cols: usize,
+    out_rows: usize,
+    out_cols: usize,
+    window_rows: usize,
+    window_cols: usize,
+    stride_rows: usize,
+    stride_cols: usize,
+    pad_rows: usize,
+    pad_cols: usize,
+    is_max: bool,
+) -> Option<Vec<i64>> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdOrd;
+    if stride_rows != 1
+        || stride_cols != 1
+        || window_rows < 2
+        || window_cols < 2
+        || window_rows.saturating_mul(window_cols) < 9
+    {
+        return None;
+    }
+    let padded_rows = out_rows + window_rows - 1;
+    let padded_cols = out_cols + window_cols - 1;
+    if pad_rows + input_rows > padded_rows || pad_cols + input_cols > padded_cols {
+        return None;
+    }
+    if src.len() != input_rows.saturating_mul(input_cols) {
+        return None;
+    }
+    let init = if is_max { i64::MIN } else { i64::MAX };
+    let sop = |a: i64, b: i64| if is_max { a.max(b) } else { a.min(b) };
+    let vop = |a: Simd<i64, 8>, b: Simd<i64, 8>| {
+        if is_max { a.simd_max(b) } else { a.simd_min(b) }
+    };
+    let owned_padded: Vec<i64>;
+    let (data, d_cols): (&[i64], usize) = if pad_rows == 0 && pad_cols == 0 {
+        (src, input_cols)
+    } else {
+        let mut padded = vec![init; padded_rows * padded_cols];
+        for r in 0..input_rows {
+            let dst_base = (pad_rows + r) * padded_cols + pad_cols;
+            padded[dst_base..dst_base + input_cols]
+                .copy_from_slice(&src[r * input_cols..(r + 1) * input_cols]);
+        }
+        owned_padded = padded;
+        (&owned_padded, padded_cols)
+    };
+    let d_rows = padded_rows;
+    // Phase 1: horizontal block van Herk (scalar; integer prefix/suffix chains don't SIMD well).
+    let mut hmax = vec![init; d_rows * out_cols];
+    let mut pref = vec![init; d_cols];
+    let mut suf = vec![init; d_cols];
+    for r in 0..d_rows {
+        let row = &data[r * d_cols..r * d_cols + d_cols];
+        let mut bs = 0;
+        while bs < d_cols {
+            let be = (bs + window_cols).min(d_cols);
+            pref[bs] = row[bs];
+            for j in bs + 1..be {
+                pref[j] = sop(pref[j - 1], row[j]);
+            }
+            bs = be;
+        }
+        let mut bs = 0;
+        while bs < d_cols {
+            let be = (bs + window_cols).min(d_cols);
+            suf[be - 1] = row[be - 1];
+            let mut j = be - 1;
+            while j > bs {
+                j -= 1;
+                suf[j] = sop(suf[j + 1], row[j]);
+            }
+            bs = be;
+        }
+        let hr = &mut hmax[r * out_cols..r * out_cols + out_cols];
+        for (oc, hv) in hr.iter_mut().enumerate() {
+            *hv = sop(suf[oc], pref[oc + window_cols - 1]);
+        }
+    }
+    // Phase 2: vertical block van Herk over rows, SIMD (i64x8) across out_cols.
+    let mut prefh = vec![init; d_rows * out_cols];
+    let mut sufh = vec![init; d_rows * out_cols];
+    macro_rules! op_row {
+        ($dst:expr, $db:expr, $ab:expr, $bb:expr) => {{
+            let mut k = 0;
+            while k + 8 <= out_cols {
+                let av = Simd::<i64, 8>::from_slice(&hmax[$ab + k..$ab + k + 8]);
+                let bv = Simd::<i64, 8>::from_slice(&$dst[$bb + k..$bb + k + 8]);
+                vop(av, bv).copy_to_slice(&mut $dst[$db + k..$db + k + 8]);
+                k += 8;
+            }
+            while k < out_cols {
+                $dst[$db + k] = sop(hmax[$ab + k], $dst[$bb + k]);
+                k += 1;
+            }
+        }};
+    }
+    let mut bs = 0;
+    while bs < d_rows {
+        let be = (bs + window_rows).min(d_rows);
+        prefh[bs * out_cols..bs * out_cols + out_cols]
+            .copy_from_slice(&hmax[bs * out_cols..bs * out_cols + out_cols]);
+        for r in bs + 1..be {
+            op_row!(prefh, r * out_cols, r * out_cols, (r - 1) * out_cols);
+        }
+        bs = be;
+    }
+    let mut bs = 0;
+    while bs < d_rows {
+        let be = (bs + window_rows).min(d_rows);
+        sufh[(be - 1) * out_cols..(be - 1) * out_cols + out_cols]
+            .copy_from_slice(&hmax[(be - 1) * out_cols..(be - 1) * out_cols + out_cols]);
+        let mut r = be - 1;
+        while r > bs {
+            r -= 1;
+            op_row!(sufh, r * out_cols, r * out_cols, (r + 1) * out_cols);
+        }
+        bs = be;
+    }
+    let mut output = vec![init; out_rows * out_cols];
+    for o in 0..out_rows {
+        let sr = o * out_cols;
+        let pr = (o + window_rows - 1) * out_cols;
+        let ob = o * out_cols;
+        let mut k = 0;
+        while k + 8 <= out_cols {
+            let s = Simd::<i64, 8>::from_slice(&sufh[sr + k..sr + k + 8]);
+            let p = Simd::<i64, 8>::from_slice(&prefh[pr + k..pr + k + 8]);
+            vop(s, p).copy_to_slice(&mut output[ob + k..ob + k + 8]);
+            k += 8;
+        }
+        while k < out_cols {
+            output[ob + k] = sop(sufh[sr + k], prefh[pr + k]);
+            k += 1;
+        }
+    }
+    Some(output)
+}
+
 /// Rank-2 F64 max/min reduce_window (maxpool/minpool) over contiguous f64
 /// values. Dense tensors borrow their backing storage; literal-backed F64
 /// tensors are packed once by the caller. Bit-for-bit identical to the generic
@@ -9406,6 +9556,42 @@ fn eval_reduce_window(
         ));
     }
 
+    // Rank-2 integer BLOCK-STRUCTURED van Herk — hoisted ABOVE the general i64 deque below (mirrors the
+    // float van Herk). Branchless + SIMD (i64x8) vertical pass beats the scalar deque, AND covers the
+    // 3x3-VALID window that falls below the deque gate to the naive fold. i32 shares the i64 backing;
+    // max/min selects an in-range value so the I32 dtype is just preserved (no wrap). Bit-exact.
+    if no_base_dilation
+        && no_window_dilation
+        && rank == 2
+        && matches!(tensor.dtype, fj_core::DType::I64 | fj_core::DType::I32)
+        && matches!(reduce_op, "max" | "min")
+        && let Some(src) = tensor.elements.as_i64_slice()
+        && let Some(values) = separable_reduce_window_rank2_maxmin_i64(
+            src,
+            tensor.shape.dims[0] as usize,
+            tensor.shape.dims[1] as usize,
+            out_dims[0] as usize,
+            out_dims[1] as usize,
+            window_dims[0],
+            window_dims[1],
+            strides[0],
+            strides[1],
+            pad_lows[0],
+            pad_lows[1],
+            reduce_op == "max",
+        )
+    {
+        let shape = Shape {
+            dims: out_dims.clone(),
+        };
+        let tv = if tensor.dtype == fj_core::DType::I32 {
+            TensorValue::new_i32_values(shape, values)
+        } else {
+            TensorValue::new_i64_values(shape, values)
+        };
+        return Ok(Value::Tensor(tv.map_err(EvalError::from)?));
+    }
+
     // Separable i64 max/min: integer sibling of the float deque above. Large-window
     // integer max/min pooling otherwise ran the per-window O(output·∏window) dense
     // path; the monotonic-deque per-axis pass is window-independent and bit-identical
@@ -13186,6 +13372,60 @@ mod tests {
                     assert_eq!(
                         got, want,
                         "van Herk diverges: w={wr}x{wc} pad={pr},{pc} is_max={is_max}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Integer sibling: separable_reduce_window_rank2_maxmin_i64 must be bit-exact to the naive fold
+    // (integer max/min is a total order — no NaN/±0). max+min, VALID + same-padding, non-square windows.
+    #[test]
+    fn van_herk_rank2_maxmin_i64_matches_naive() {
+        let (rows, cols) = (37usize, 41usize);
+        let src: Vec<i64> = (0..rows * cols)
+            .map(|i| (((i * 2654435761usize) % 20011) as i64) - 10000)
+            .collect();
+        let naive = |wr: usize, wc: usize, pr: usize, pc: usize, is_max: bool| -> Vec<i64> {
+            let out_rows = rows + 2 * pr - wr + 1;
+            let out_cols = cols + 2 * pc - wc + 1;
+            let init = if is_max { i64::MIN } else { i64::MAX };
+            let mut out = Vec::with_capacity(out_rows * out_cols);
+            for orr in 0..out_rows {
+                for occ in 0..out_cols {
+                    let mut a = init;
+                    for dr in 0..wr {
+                        let pr_idx = orr + dr;
+                        if pr_idx < pr || pr_idx - pr >= rows {
+                            continue;
+                        }
+                        for dc in 0..wc {
+                            let pc_idx = occ + dc;
+                            if pc_idx < pc || pc_idx - pc >= cols {
+                                continue;
+                            }
+                            let v = src[(pr_idx - pr) * cols + (pc_idx - pc)];
+                            a = if is_max { a.max(v) } else { a.min(v) };
+                        }
+                    }
+                    out.push(a);
+                }
+            }
+            out
+        };
+        for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6), (3, 3), (3, 4)] {
+            for &is_max in &[true, false] {
+                for &(pr, pc) in &[(0usize, 0usize), (wr - 1, wc - 1)] {
+                    let out_rows = rows + 2 * pr - wr + 1;
+                    let out_cols = cols + 2 * pc - wc + 1;
+                    let got = super::separable_reduce_window_rank2_maxmin_i64(
+                        &src, rows, cols, out_rows, out_cols, wr, wc, 1, 1, pr, pc, is_max,
+                    )
+                    .expect("i64 van Herk should engage for w>=3x3");
+                    let want = naive(wr, wc, pr, pc, is_max);
+                    assert_eq!(
+                        got, want,
+                        "i64 van Herk diverges: w={wr}x{wc} pad={pr},{pc} is_max={is_max}"
                     );
                 }
             }

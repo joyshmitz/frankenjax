@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - WIRED WIN (~3.1-3.7x internal): integer (i64/i32) rank-2 van Herk maxpool/minpool (TealMarten)
+
+Completes the rank-2 van Herk pooling family for integers. The whole integer rank-2 max/min family was on
+the slow path: w7 (49 taps) hit the SCALAR monotonic deque (`reduce_window_separable_maxmin_i64`), w3 (9
+taps) fell below the deque gate (`9 > 12` false) to the naive O(out·9) fold. Measured (dense i64 1024²,
+host at load ~68-77 so absolutes inflated but before/after same-regime): w7 **53ms** (deque) / w3 **66ms**
+(naive). Added `separable_reduce_window_rank2_maxmin_i64` — the integer sibling of the f64 van Herk, SIMPLER
+(integer max/min is a total order: no NaN, no ±0, bit-exact with plain `Ord::max`/`min`, no scalar fallback);
+i64x8 SIMD vertical pass. Hoisted above the i64 deque for rank-2, gate `>= 9` (3x3+). i32 shares the i64
+backing and max/min selects an in-range value (no wrap) so the I32 dtype is preserved. AFTER: w7 **17.1ms**
+= 3.1x, w3 **18.0ms** = 3.7x, and w7≈w3 (window-independent path confirmed). The identical f64 algorithm
+measured a clean 2.99x (deque 20.6→6.9ms) earlier this session, so ~3x is well-supported. Bit-exact
+(`van_herk_rank2_maxmin_i64_matches_naive`: max+min, VALID+same-pad, non-square). full fj-lax lib 1729/0.
+The ENTIRE rank-2 max/min pooling family (f64/f32/bf16/f16/i64/i32, 3x3..NxN) now rides the SIMD van Herk.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): multi-accumulator ILP does NOT speed up SIMD reduce_max/min — already BW-bound (TealMarten)
 
 The ledger recorded reduce_max 4M f64 = 2.46ms vs JAX 0.71ms = 3.5x. Two findings: (1) that 2.46ms was
