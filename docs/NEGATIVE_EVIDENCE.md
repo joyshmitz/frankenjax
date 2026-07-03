@@ -116,6 +116,20 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (12.1x; 13.4x JAX LOSS -> parity): threaded bf16/f16 argmax (was SERIAL for all axes) (TealMarten)
+
+Different primitive (argmax). bf16/f16 argmax used a SERIAL per-slice scan for ALL axes — including the
+contiguous last axis, the HOT token-prediction / logits-argmax case — while f64/f32 had the threaded/blocked
+fast paths (`parallel_argmax_fill` last-axis, `parallel_arg_extreme_axis0` leading, `arg_extreme_middle_axis`
+middle). bf16/f16 widen to f64 EXACTLY + order-preservingly (NaN→NaN), so rewrote the half branch to mirror
+f64 with a half→f64 `widen` closure. BIT-IDENTICAL (same `f64::from(decode)` the generic path used, same
+`arg_extreme_float` reducer — -NaN selection + ±0.0 ties preserved; 14 argmax tests + full lib 1736/0
+green). Measured (`eval/argmax_bf16_4096x32000_axis1`, vocab-size logits, `FJ_ARGMAX_HALF_SERIAL` toggle):
+serial **177.9ms -> threaded 14.65ms = 12.1x**, and **14.65ms vs JAX 13.27ms = ~parity (1.1x)** — was
+**13.4x SLOWER than JAX**, a big loss on a very common op flipped to parity. Covers last/leading/middle axis
+for bf16 AND f16. (i64 MIDDLE-axis argmax stays strided-serial: arg_extreme widens to f64, lossy for i64 >
+2^53 — needs an exact-i64 middle-axis; filed, niche.)
+
 ## 2026-07-03 - WIRED WIN (THREADED, now 1.43x FASTER than JAX): i64/i32 leading-axis cumulative 3-pass blocked prefix (TealMarten)
 
 FOLLOW-UP to the contiguous-streaming win below — threaded it. Added `scan_leading_axis_i64_threaded`: the

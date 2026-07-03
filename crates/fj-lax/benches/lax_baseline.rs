@@ -3629,6 +3629,33 @@ fn bench_tan_2m_f64(c: &mut Criterion) {
     });
 }
 
+// bf16 argmax along the last axis (token prediction / logits): [4096, 32000] bf16 -> threaded per-row
+// vs the old serial per-slice scan (env FJ_ARGMAX_HALF_SERIAL).
+fn bench_argmax_bf16_logits_axis1(c: &mut Criterion) {
+    let (rows, cols) = (4096usize, 32000usize);
+    let bits: Vec<u16> = (0..rows * cols)
+        .map(|i| {
+            let v = (((i * 131 + 7) % 9973) as f32) * 0.001 - 5.0;
+            (v.to_bits() >> 16) as u16
+        })
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            bits,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "1".to_owned());
+    c.bench_function("eval/argmax_bf16_4096x32000_axis1", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Argmax, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_sort_64k_i64(c: &mut Criterion) {
     let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_003) - 500_000)
@@ -8654,6 +8681,7 @@ criterion_group!(
     bench_cummin_1m_f64_1d,
     bench_cumsum_4096x1024_f64_axis1,
     bench_cumsum_64k_f64_literal_reference,
+    bench_argmax_bf16_logits_axis1,
     bench_sort_64k_i64,
     bench_assoc_scan_bf16_batched,
     bench_rsqrt_8m_f64,

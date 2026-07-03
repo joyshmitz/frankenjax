@@ -9347,25 +9347,51 @@ fn extremum_along_axis(
             result_elements.push(Literal::I64(best_idx as i64));
         }
     } else if let Some(values) = tensor.elements.as_half_float_slice() {
-        // Dense half-float (BF16/F16): mixed-precision argmax-over-logits. Scan
-        // the contiguous &[u16] slice directly, decoding each tap half->f32->f64.
-        // The generic float branch below reconstructs a `Literal` via
-        // `tensor.elements.get(..)` (materializing the whole Vec<Literal>) then
-        // calls `as_f64()` = `f64::from(f32::from(half))`; `f64::from(decode(b))`
-        // here is exactly that, fed to the same `arg_extreme_float` reducer, so
-        // -NaN selection and ±0.0 ties are identical.
+        // Dense half-float (BF16/F16): mixed-precision argmax-over-logits. bf16/f16 widen to f64 EXACTLY
+        // and order-preservingly (NaN→NaN), so this mirrors the f64 branch's THREADED/blocked fast paths
+        // with a half→f64 `widen` closure — argmax-of-bf16-logits along the last axis (the hot token-
+        // prediction case) was previously a SERIAL per-slice scan. Bit-identical (same `f64::from(decode)`
+        // the generic path uses, same `arg_extreme_float` reducer, so -NaN selection + ±0.0 ties match).
         let is_bf16 = tensor.dtype == DType::BF16;
-        let decode = |b: u16| -> f32 {
-            if is_bf16 {
+        let widen = move |b: u16| -> f64 {
+            f64::from(if is_bf16 {
                 Literal::BF16Bits(b).as_bf16_f32().unwrap_or(f32::NAN)
             } else {
                 Literal::F16Bits(b).as_f16_f32().unwrap_or(f32::NAN)
-            }
+            })
         };
+        if axis_stride == 1 {
+            // Contiguous last axis (hot logits case): thread over the independent output rows.
+            let idx = parallel_argmax_fill(outer_count, total, |outer| {
+                let base = outer * axis_dim;
+                arg_extreme_float(axis_dim, find_max, |i| widen(values[base + i])) as i64
+            });
+            if result_shape.dims.is_empty() {
+                return Ok(Value::Scalar(Literal::I64(idx[0])));
+            }
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+        if axis == 0 && outer_count > 1 {
+            let idx = parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, widen);
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+        if axis_stride > 1 && outer_count.is_multiple_of(axis_stride) {
+            let inner = axis_stride;
+            let before = outer_count / inner;
+            let idx =
+                arg_extreme_middle_axis(values, axis_dim, inner, before, total, find_max, widen);
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
         for outer in 0..outer_count {
             let base = base_of(outer)?;
             let best_idx = arg_extreme_float(axis_dim, find_max, |i| {
-                f64::from(decode(values[base + i * axis_stride]))
+                widen(values[base + i * axis_stride])
             });
             result_elements.push(Literal::I64(best_idx as i64));
         }
