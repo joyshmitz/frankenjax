@@ -2,6 +2,19 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - WIRED WIN (3.0x internal): STRIDED (stride>1) rank-2 van Herk maxpool/minpool (TealMarten)
+
+Extended the rank-2 van Herk (f64/f32/half/i64/i32) from stride-1-only to stride>1. A strided rank-2
+maxpool (e.g. w7 s2) has win_total 49 > 2·14 so it hit the SCALAR deque. van Herk is window-independent:
+the block prefix/suffix passes cover every input position regardless of stride, so only the final emission
+changes — output `o` reads the window starting at `o*stride` (horizontal `oc*stride_cols`, vertical
+`o*stride_rows`); the padded span becomes `(out-1)*stride + window`. VALID (pad 0) drops the trailing
+remainder that no window covers; strided-with-padding still falls back to the deque (niche). Clean
+same-load A/B (`eval/maxpool2d_1024x1024_w7s2_valid_f64`, load 18): deque **12.64ms -> van Herk 4.21ms =
+3.0x**. Bit-identical (max/min assoc+idempotent; the van_herk f64+i64 tests now cover stride 2/2, 2/1, 3/2
+× max/min × VALID). full fj-lax lib 1729/0. Rank-2 max/min pooling is now van-Herk across ALL dtypes AND
+strides (only strided-WITH-padding stays on the deque).
+
 ## 2026-07-03 - WIRED WIN (~3.1-3.7x internal): integer (i64/i32) rank-2 van Herk maxpool/minpool (TealMarten)
 
 Completes the rank-2 van Herk pooling family for integers. The whole integer rank-2 max/min family was on

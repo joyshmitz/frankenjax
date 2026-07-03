@@ -5248,7 +5248,8 @@ fn eval_reduce_window_rank2_f64_sum(
 /// with NO modulo, so each element pays ~2 compares/pass instead of `window`.
 /// Finite-gated (the fill identity is ±inf, and `op(finite, ±inf)` never yields
 /// NaN, so for finite inputs plain `f64::max`/`min` == `jax_max_f64`/`jax_min_f64`
-/// and OOB-skip == identity-fill — bit-identical to the naive fold). stride 1 only;
+/// and OOB-skip == identity-fill — bit-identical to the naive fold). Strided (stride > 1) supported —
+/// block passes cover every position, emission subsamples (output o reads the window at o*stride);
 /// `window_rows*window_cols >= 9` gate (3x3+): van Herk is window-INDEPENDENT (block prefix/suffix is
 /// O(input) regardless of window), so 3x3 costs what 7x7 costs — 3x3-VALID maxpool was ~3.2x slower on
 /// the scalar naive fold than 7x7 on this path (see docs/NEGATIVE_EVIDENCE.md 2026-07-03).
@@ -5269,17 +5270,33 @@ fn separable_reduce_window_rank2_maxmin_f64(
 ) -> Option<Vec<f64>> {
     use std::simd::Simd;
     use std::simd::num::SimdFloat;
-    if stride_rows != 1
-        || stride_cols != 1
+    if stride_rows == 0
+        || stride_cols == 0
+        || out_rows == 0
+        || out_cols == 0
         || window_rows < 2
         || window_cols < 2
         || window_rows.saturating_mul(window_cols) < 9
     {
         return None;
     }
-    let padded_rows = out_rows + window_rows - 1;
-    let padded_cols = out_cols + window_cols - 1;
-    if pad_rows + input_rows > padded_rows || pad_cols + input_cols > padded_cols {
+    // Strided (stride > 1) is supported: the block prefix/suffix passes cover EVERY input position
+    // (window-independent), and only the final emission subsamples — output `o` reads the window that
+    // starts at `o*stride`. `padded` spans the last window's end: (out-1)*stride + window.
+    let padded_rows = (out_rows - 1) * stride_rows + window_rows;
+    let padded_cols = (out_cols - 1) * stride_cols + window_cols;
+    if pad_rows == 0 && pad_cols == 0 {
+        // VALID: the windows must fit within the input; for stride > 1 the trailing remainder
+        // (input_dim - padded_dim) rows/cols are simply not covered by any output window (dropped).
+        if padded_rows > input_rows || padded_cols > input_cols {
+            return None;
+        }
+    } else if stride_rows != 1
+        || stride_cols != 1
+        || pad_rows + input_rows > padded_rows
+        || pad_cols + input_cols > padded_cols
+    {
+        // Padded materialization is stride-1 only; strided-with-padding falls back to the deque.
         return None;
     }
     if src.len() != input_rows.saturating_mul(input_cols) || !src.iter().all(|v| v.is_finite()) {
@@ -5340,7 +5357,8 @@ fn separable_reduce_window_rank2_maxmin_f64(
         }
         let hr = &mut hmax[r * out_cols..r * out_cols + out_cols];
         for (oc, hv) in hr.iter_mut().enumerate() {
-            *hv = sop(suf[oc], pref[oc + window_cols - 1]);
+            let ws = oc * stride_cols; // window start column
+            *hv = sop(suf[ws], pref[ws + window_cols - 1]);
         }
     }
     // Phase 2: vertical block van Herk over rows (block = window_rows), SIMD across out_cols.
@@ -5385,8 +5403,9 @@ fn separable_reduce_window_rank2_maxmin_f64(
     }
     let mut output = vec![init; out_rows * out_cols];
     for o in 0..out_rows {
-        let sr = o * out_cols;
-        let pr = (o + window_rows - 1) * out_cols;
+        let wr = o * stride_rows; // window start row
+        let sr = wr * out_cols;
+        let pr = (wr + window_rows - 1) * out_cols;
         let ob = o * out_cols;
         let mut k = 0;
         while k + 8 <= out_cols {
@@ -5408,7 +5427,7 @@ fn separable_reduce_window_rank2_maxmin_f64(
 /// sign ambiguity), so it is BIT-EXACT with plain `Ord::max`/`min` and no scalar fallback. i32 tensors are
 /// i64-backed (sign-extended) and max/min SELECTS an in-range input value, so no mod-2^32 wrap is needed —
 /// the caller preserves the I32 dtype. OOB (padded) taps are the identity (i64::MIN for max / i64::MAX for
-/// min), matching the naive skip-OOB. stride 1 only; `window_rows*window_cols >= 9` gate (3x3+). Replaces
+/// min), matching the naive skip-OOB. Strided supported; `window_rows*window_cols >= 9` gate (3x3+). Replaces
 /// both the scalar deque (large windows) and the naive fold (small windows) for the integer family.
 #[allow(clippy::too_many_arguments)]
 fn separable_reduce_window_rank2_maxmin_i64(
@@ -5427,17 +5446,28 @@ fn separable_reduce_window_rank2_maxmin_i64(
 ) -> Option<Vec<i64>> {
     use std::simd::Simd;
     use std::simd::cmp::SimdOrd;
-    if stride_rows != 1
-        || stride_cols != 1
+    if stride_rows == 0
+        || stride_cols == 0
+        || out_rows == 0
+        || out_cols == 0
         || window_rows < 2
         || window_cols < 2
         || window_rows.saturating_mul(window_cols) < 9
     {
         return None;
     }
-    let padded_rows = out_rows + window_rows - 1;
-    let padded_cols = out_cols + window_cols - 1;
-    if pad_rows + input_rows > padded_rows || pad_cols + input_cols > padded_cols {
+    // Strided supported — see the f64 helper: block passes cover every position, emission subsamples.
+    let padded_rows = (out_rows - 1) * stride_rows + window_rows;
+    let padded_cols = (out_cols - 1) * stride_cols + window_cols;
+    if pad_rows == 0 && pad_cols == 0 {
+        if padded_rows > input_rows || padded_cols > input_cols {
+            return None;
+        }
+    } else if stride_rows != 1
+        || stride_cols != 1
+        || pad_rows + input_rows > padded_rows
+        || pad_cols + input_cols > padded_cols
+    {
         return None;
     }
     if src.len() != input_rows.saturating_mul(input_cols) {
@@ -5490,7 +5520,8 @@ fn separable_reduce_window_rank2_maxmin_i64(
         }
         let hr = &mut hmax[r * out_cols..r * out_cols + out_cols];
         for (oc, hv) in hr.iter_mut().enumerate() {
-            *hv = sop(suf[oc], pref[oc + window_cols - 1]);
+            let ws = oc * stride_cols; // window start column
+            *hv = sop(suf[ws], pref[ws + window_cols - 1]);
         }
     }
     // Phase 2: vertical block van Herk over rows, SIMD (i64x8) across out_cols.
@@ -5535,8 +5566,9 @@ fn separable_reduce_window_rank2_maxmin_i64(
     }
     let mut output = vec![init; out_rows * out_cols];
     for o in 0..out_rows {
-        let sr = o * out_cols;
-        let pr = (o + window_rows - 1) * out_cols;
+        let wr = o * stride_rows; // window start row
+        let sr = wr * out_cols;
+        let pr = (wr + window_rows - 1) * out_cols;
         let ob = o * out_cols;
         let mut k = 0;
         while k + 8 <= out_cols {
@@ -13328,9 +13360,16 @@ mod tests {
         let src: Vec<f64> = (0..rows * cols)
             .map(|i| (((i * 2654435761usize) % 10007) as f64) * 0.017 - 85.0)
             .collect();
-        let naive = |wr: usize, wc: usize, pr: usize, pc: usize, is_max: bool| -> Vec<f64> {
-            let out_rows = rows + 2 * pr - wr + 1;
-            let out_cols = cols + 2 * pc - wc + 1;
+        let naive = |wr: usize,
+                     wc: usize,
+                     pr: usize,
+                     pc: usize,
+                     sr: usize,
+                     sc: usize,
+                     is_max: bool|
+         -> Vec<f64> {
+            let out_rows = (rows + 2 * pr - wr) / sr + 1;
+            let out_cols = (cols + 2 * pc - wc) / sc + 1;
             let init = if is_max {
                 f64::NEG_INFINITY
             } else {
@@ -13341,12 +13380,12 @@ mod tests {
                 for occ in 0..out_cols {
                     let mut a = init;
                     for dr in 0..wr {
-                        let pr_idx = orr + dr;
+                        let pr_idx = orr * sr + dr;
                         if pr_idx < pr || pr_idx - pr >= rows {
                             continue;
                         }
                         for dc in 0..wc {
-                            let pc_idx = occ + dc;
+                            let pc_idx = occ * sc + dc;
                             if pc_idx < pc || pc_idx - pc >= cols {
                                 continue;
                             }
@@ -13361,17 +13400,24 @@ mod tests {
         };
         for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6), (3, 3), (3, 4)] {
             for &is_max in &[true, false] {
-                for &(pr, pc) in &[(0usize, 0usize), (wr - 1, wc - 1)] {
-                    let out_rows = rows + 2 * pr - wr + 1;
-                    let out_cols = cols + 2 * pc - wc + 1;
+                // (pad_r, pad_c, stride_r, stride_c): unit + same-pad + strided-VALID variants.
+                for &(pr, pc, sr, sc) in &[
+                    (0usize, 0usize, 1usize, 1usize),
+                    (wr - 1, wc - 1, 1, 1),
+                    (0, 0, 2, 2),
+                    (0, 0, 2, 1),
+                    (0, 0, 3, 2),
+                ] {
+                    let out_rows = (rows + 2 * pr - wr) / sr + 1;
+                    let out_cols = (cols + 2 * pc - wc) / sc + 1;
                     let got = super::separable_reduce_window_rank2_maxmin_f64(
-                        &src, rows, cols, out_rows, out_cols, wr, wc, 1, 1, pr, pc, is_max,
+                        &src, rows, cols, out_rows, out_cols, wr, wc, sr, sc, pr, pc, is_max,
                     )
-                    .expect("van Herk should engage for w>=5 finite");
-                    let want = naive(wr, wc, pr, pc, is_max);
+                    .expect("van Herk should engage for w>=3x3 finite");
+                    let want = naive(wr, wc, pr, pc, sr, sc, is_max);
                     assert_eq!(
                         got, want,
-                        "van Herk diverges: w={wr}x{wc} pad={pr},{pc} is_max={is_max}"
+                        "van Herk diverges: w={wr}x{wc} pad={pr},{pc} stride={sr},{sc} is_max={is_max}"
                     );
                 }
             }
@@ -13386,21 +13432,28 @@ mod tests {
         let src: Vec<i64> = (0..rows * cols)
             .map(|i| (((i * 2654435761usize) % 20011) as i64) - 10000)
             .collect();
-        let naive = |wr: usize, wc: usize, pr: usize, pc: usize, is_max: bool| -> Vec<i64> {
-            let out_rows = rows + 2 * pr - wr + 1;
-            let out_cols = cols + 2 * pc - wc + 1;
+        let naive = |wr: usize,
+                     wc: usize,
+                     pr: usize,
+                     pc: usize,
+                     sr: usize,
+                     sc: usize,
+                     is_max: bool|
+         -> Vec<i64> {
+            let out_rows = (rows + 2 * pr - wr) / sr + 1;
+            let out_cols = (cols + 2 * pc - wc) / sc + 1;
             let init = if is_max { i64::MIN } else { i64::MAX };
             let mut out = Vec::with_capacity(out_rows * out_cols);
             for orr in 0..out_rows {
                 for occ in 0..out_cols {
                     let mut a = init;
                     for dr in 0..wr {
-                        let pr_idx = orr + dr;
+                        let pr_idx = orr * sr + dr;
                         if pr_idx < pr || pr_idx - pr >= rows {
                             continue;
                         }
                         for dc in 0..wc {
-                            let pc_idx = occ + dc;
+                            let pc_idx = occ * sc + dc;
                             if pc_idx < pc || pc_idx - pc >= cols {
                                 continue;
                             }
@@ -13415,17 +13468,23 @@ mod tests {
         };
         for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6), (3, 3), (3, 4)] {
             for &is_max in &[true, false] {
-                for &(pr, pc) in &[(0usize, 0usize), (wr - 1, wc - 1)] {
-                    let out_rows = rows + 2 * pr - wr + 1;
-                    let out_cols = cols + 2 * pc - wc + 1;
+                for &(pr, pc, sr, sc) in &[
+                    (0usize, 0usize, 1usize, 1usize),
+                    (wr - 1, wc - 1, 1, 1),
+                    (0, 0, 2, 2),
+                    (0, 0, 2, 1),
+                    (0, 0, 3, 2),
+                ] {
+                    let out_rows = (rows + 2 * pr - wr) / sr + 1;
+                    let out_cols = (cols + 2 * pc - wc) / sc + 1;
                     let got = super::separable_reduce_window_rank2_maxmin_i64(
-                        &src, rows, cols, out_rows, out_cols, wr, wc, 1, 1, pr, pc, is_max,
+                        &src, rows, cols, out_rows, out_cols, wr, wc, sr, sc, pr, pc, is_max,
                     )
                     .expect("i64 van Herk should engage for w>=3x3");
-                    let want = naive(wr, wc, pr, pc, is_max);
+                    let want = naive(wr, wc, pr, pc, sr, sc, is_max);
                     assert_eq!(
                         got, want,
-                        "i64 van Herk diverges: w={wr}x{wc} pad={pr},{pc} is_max={is_max}"
+                        "i64 van Herk diverges: w={wr}x{wc} pad={pr},{pc} stride={sr},{sc} is_max={is_max}"
                     );
                 }
             }

@@ -5289,6 +5289,15 @@ fn bench_pool_vs_jax(c: &mut Criterion) {
             )
         })
     });
+    // Strided (s2) rank-2 maxpool: van Herk requires stride==1, so w7s2 hits the scalar deque.
+    let mut p_max7s2 = BTreeMap::new();
+    p_max7s2.insert("reduce_op".to_owned(), "max".to_owned());
+    p_max7s2.insert("window_dimensions".to_owned(), "7,7".to_owned());
+    p_max7s2.insert("window_strides".to_owned(), "2,2".to_owned());
+    p_max7s2.insert("padding".to_owned(), "VALID".to_owned());
+    c.bench_function("eval/maxpool2d_1024x1024_w7s2_valid_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_max7s2))
+    });
     let mut p_sum3 = BTreeMap::new();
     p_sum3.insert("reduce_op".to_owned(), "sum".to_owned());
     p_sum3.insert("window_dimensions".to_owned(), "3,3".to_owned());
