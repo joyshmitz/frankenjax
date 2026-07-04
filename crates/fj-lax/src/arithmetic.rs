@@ -14075,6 +14075,28 @@ fn erf_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
         1.36370839120290507362e-02,
         1.19844998467991074170e-02,
     ];
+    // Branch-3 tail rationals (1.25 <= |x| < 2.857), from FreeBSD/Cephes erf. This branch needs
+    // an exp, so it was previously scalar-only; `exp_cephes_block_f64` lets it run 8-wide.
+    const RA: [f64; 8] = [
+        -9.86494403484714822705e-03,
+        -6.93858572707181764372e-01,
+        -1.05586262253232909814e+01,
+        -6.23753324503260060396e+01,
+        -1.62396669462573470355e+02,
+        -1.84605092906711035994e+02,
+        -8.12874355063065934246e+01,
+        -9.81432934416914548592e+00,
+    ];
+    const SA: [f64; 8] = [
+        1.96512716674392571292e+01,
+        1.37657754143519042600e+02,
+        4.34565877475229228821e+02,
+        6.45387271733267880336e+02,
+        4.29008140027567833386e+02,
+        1.08635005541779435134e+02,
+        6.57024977031928170135e+00,
+        -6.04244152148580987438e-02,
+    ];
     let one = Simd::splat(1.0);
     let ax = x.abs();
     let sign = x.simd_lt(Simd::splat(0.0)).select(Simd::splat(-1.0), one);
@@ -14096,6 +14118,113 @@ fn erf_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
         let q2 = one + z2 * horner8(z2, &QA);
         sign * (Simd::splat(ERX) + p2 / q2)
     };
+    let b3 = || {
+        // branch 3: 1.25 <= ax < 2.857 — erfc = exp(-x² - 0.5625 + R(z)/S(z))/x, z = 1/x².
+        let z3 = one / (ax * ax);
+        let r3 = horner8(z3, &RA);
+        let s3 = one + z3 * horner8(z3, &SA);
+        let arg = -(ax * ax) - Simd::splat(0.5625) + r3 / s3;
+        let erfc = crate::simd_exp::exp_cephes_block_f64(arg) / ax;
+        sign * (one - erfc)
+    };
+    let m1 = ax.simd_lt(Simd::splat(0.84375));
+    let m_lt125 = ax.simd_lt(Simd::splat(1.25));
+    // Skip the branch-3 exp entirely when every lane is in a rational branch (the hot case:
+    // erf clusters near 0). res = m1 ? b1 : (m_lt125 ? b2 : b3).
+    let mut res = if m_lt125.all() {
+        if m1.all() {
+            b1()
+        } else if !m1.any() {
+            b2()
+        } else {
+            m1.select(b1(), b2())
+        }
+    } else {
+        m1.select(b1(), m_lt125.select(b2(), b3()))
+    };
+    // Scalar fallback for lanes the SIMD branches don't cover: |x| >= 2.857 (the branch-4/5
+    // asymptotic tail, incl. inf/NaN which compare false against 2.857) or x == 0 (erf_approx
+    // returns the signed zero). Branch 3 is tolerance-equal (not bit-identical) to scalar
+    // `erf_approx` because it uses the SIMD Cephes exp; the rational branches stay bit-identical.
+    const TAIL: f64 = 2.857142857142857;
+    let simd_ok = ax.simd_lt(Simd::splat(TAIL)) & x.simd_ne(Simd::splat(0.0));
+    if !simd_ok.all() {
+        let xa = x.to_array();
+        let mut ra = res.to_array();
+        for k in 0..8 {
+            if !(xa[k] != 0.0 && xa[k].abs() < TAIL) {
+                ra[k] = erf_approx(xa[k]);
+            }
+        }
+        res = Simd::from_array(ra);
+    }
+    res
+}
+
+/// A/B reference: the pre-tail-SIMD erf kernel (SIMD only for the two rational branches |x|<1.25;
+/// scalar `erf_approx` for the |x|>=1.25 tail). Used only by `bench_erf_simd_tail_vs_scalar_tail`
+/// to measure the branch-3 SIMD-exp lever in the same binary.
+#[cfg(test)]
+fn erf_f64x8_scalartail(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    #[inline]
+    fn horner8(x: Simd<f64, 8>, coeffs: &[f64]) -> Simd<f64, 8> {
+        let mut y = Simd::splat(coeffs[coeffs.len() - 1]);
+        for &c in coeffs[..coeffs.len() - 1].iter().rev() {
+            y = y * x + Simd::splat(c);
+        }
+        y
+    }
+    const ERX: f64 = 8.45062911510467529297e-01;
+    const PP: [f64; 5] = [
+        1.28379167095512558561e-01,
+        -3.25042107247001499370e-01,
+        -2.84817495755985104766e-02,
+        -5.77027029648944159157e-03,
+        -2.37630166566501626084e-05,
+    ];
+    const QQ: [f64; 5] = [
+        3.97917223959155352819e-01,
+        6.50222499887672944485e-02,
+        5.08130628187576562776e-03,
+        1.32494738004321644526e-04,
+        -3.96022827877536812320e-06,
+    ];
+    const PA: [f64; 7] = [
+        -2.36211856075265944077e-03,
+        4.14856118683748331666e-01,
+        -3.72207876035701323847e-01,
+        3.18346619901161753674e-01,
+        -1.10894694282396677476e-01,
+        3.54783043256182359371e-02,
+        -2.16637559486879084300e-03,
+    ];
+    const QA: [f64; 6] = [
+        1.06420880400844228286e-01,
+        5.40397917702171048937e-01,
+        7.18286544141962662868e-02,
+        1.26171219808761642112e-01,
+        1.36370839120290507362e-02,
+        1.19844998467991074170e-02,
+    ];
+    let one = Simd::splat(1.0);
+    let ax = x.abs();
+    let sign = x.simd_lt(Simd::splat(0.0)).select(Simd::splat(-1.0), one);
+    let b1 = || {
+        let z1 = ax * ax;
+        let r1 = horner8(z1, &PP);
+        let s1 = one + z1 * horner8(z1, &QQ);
+        sign * (ax + ax * r1 / s1)
+    };
+    let b2 = || {
+        let z2 = ax - one;
+        let p2 = horner8(z2, &PA);
+        let q2 = one + z2 * horner8(z2, &QA);
+        sign * (Simd::splat(ERX) + p2 / q2)
+    };
     let m1 = ax.simd_lt(Simd::splat(0.84375));
     let mut res = if m1.all() {
         b1()
@@ -14104,8 +14233,6 @@ fn erf_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     } else {
         m1.select(b1(), b2())
     };
-    // Scalar fallback for lanes the rationals don't cover: |x| >= 1.25 (incl. inf/NaN, which
-    // compare false against 1.25) or x == 0 (erf_approx returns the signed zero).
     let simd_ok = ax.simd_lt(Simd::splat(1.25)) & x.simd_ne(Simd::splat(0.0));
     if !simd_ok.all() {
         let xa = x.to_array();
@@ -32205,12 +32332,19 @@ mod tests {
         let got =
             extract_f64_vec(&eval_erf(Primitive::Erf, std::slice::from_ref(&f64_in)).unwrap());
         for idx in 0..n {
-            assert_eq!(
-                got[idx].to_bits(),
-                erf_approx(data[idx]).to_bits(),
-                "f64 erf at x={}",
-                data[idx]
-            );
+            let x = data[idx];
+            let want = erf_approx(x);
+            if (1.25..2.857142857142857).contains(&x.abs()) {
+                // branch-3 tail is SIMD via the Cephes exp -> tolerance-equal, not bit-identical
+                // (rational branches |x|<1.25 and the |x|>=2.857 scalar fallback stay bit-exact).
+                assert!(
+                    (got[idx] - want).abs() <= 1e-13,
+                    "f64 erf tail at x={x}: {} vs {want}",
+                    got[idx]
+                );
+            } else {
+                assert_eq!(got[idx].to_bits(), want.to_bits(), "f64 erf at x={x}");
+            }
         }
         let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         let f32_in = Value::Tensor(
@@ -32227,11 +32361,18 @@ mod tests {
             _ => panic!("expected tensor"),
         };
         for idx in 0..n {
-            assert_eq!(
-                gotf[idx].to_bits(),
-                (erf_approx(dataf[idx] as f64) as f32).to_bits(),
-                "f32 erf at idx {idx}"
-            );
+            let want = erf_approx(dataf[idx] as f64) as f32;
+            if (1.25..2.857142857142857).contains(&(dataf[idx].abs() as f64)) {
+                // branch-3 tail widens through the SIMD Cephes exp; the f64 delta is far below f32
+                // ULP so it usually still rounds bit-identical, but assert tolerance to be safe.
+                assert!(
+                    (gotf[idx] - want).abs() <= 1e-6,
+                    "f32 erf tail at idx {idx}: {} vs {want}",
+                    gotf[idx]
+                );
+            } else {
+                assert_eq!(gotf[idx].to_bits(), want.to_bits(), "f32 erf at idx {idx}");
+            }
         }
         for &x in &[0.0_f64, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
             let xi = Value::Tensor(
@@ -32240,6 +32381,59 @@ mod tests {
             let g = extract_f64_vec(&eval_erf(Primitive::Erf, std::slice::from_ref(&xi)).unwrap());
             assert_eq!(g[0].to_bits(), erf_approx(x).to_bits(), "special x={x}");
         }
+    }
+
+    /// A/B for the branch-3 SIMD-exp tail lever: production `erf_f64x8` (SIMD tail for
+    /// 1.25<=|x|<2.857) vs `erf_f64x8_scalartail` (the pre-change scalar-fallback tail), both
+    /// driven through the real `eval_unary_simd_dense_f64_parallel` path over the [-2,2] erf bench
+    /// input (~37.5% of lanes in the tail). Interleaved min-of-9.
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_erf_simd_tail_vs_scalar_tail() {
+        use std::simd::Simd;
+        use std::time::Instant;
+        let n = 1usize << 20;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let f64_in = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let run = |k: fn(Simd<f64, 8>) -> Simd<f64, 8>| -> (u64, u64) {
+            let s = Instant::now();
+            let v = eval_unary_simd_dense_f64_parallel(
+                Primitive::Erf,
+                std::slice::from_ref(&f64_in),
+                k,
+                erf_approx,
+            )
+            .unwrap();
+            let dt = s.elapsed().as_nanos() as u64;
+            let out = extract_f64_vec(&v);
+            (dt, out[0].to_bits() ^ out[n / 2].to_bits())
+        };
+        let (mut oldb, mut newb) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (a, ca) = run(erf_f64x8_scalartail);
+            let (b, cb) = run(erf_f64x8);
+            chk ^= ca ^ cb;
+            oldb = oldb.min(a);
+            newb = newb.min(b);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[erf 1M f64 [-2,2] tail: scalar vs simd] scalar_tail={:.4}ms simd_tail={:.4}ms ratio={:.2}x (min of 9 interleaved)",
+            oldb as f64 / 1e6,
+            newb as f64 / 1e6,
+            oldb as f64 / newb as f64,
+        );
     }
 
     #[test]
@@ -32329,12 +32523,18 @@ mod tests {
         let got =
             extract_f64_vec(&eval_erfc(Primitive::Erfc, std::slice::from_ref(&f64_in)).unwrap());
         for idx in 0..n {
-            assert_eq!(
-                got[idx].to_bits(),
-                erfc_approx(data[idx]).to_bits(),
-                "f64 erfc at x={}",
-                data[idx]
-            );
+            let x = data[idx];
+            let want = erfc_approx(x);
+            if (1.25..2.857142857142857).contains(&x.abs()) {
+                // erfc = 1 - erf_f64x8; erf's branch-3 tail is now SIMD-exp -> tolerance-equal.
+                assert!(
+                    (got[idx] - want).abs() <= 1e-13,
+                    "f64 erfc tail at x={x}: {} vs {want}",
+                    got[idx]
+                );
+            } else {
+                assert_eq!(got[idx].to_bits(), want.to_bits(), "f64 erfc at x={x}");
+            }
         }
         let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         let f32_in = Value::Tensor(
@@ -32351,11 +32551,16 @@ mod tests {
             _ => panic!("expected tensor"),
         };
         for idx in 0..n {
-            assert_eq!(
-                gotf[idx].to_bits(),
-                (erfc_approx(dataf[idx] as f64) as f32).to_bits(),
-                "f32 erfc at idx {idx}"
-            );
+            let want = erfc_approx(dataf[idx] as f64) as f32;
+            if (1.25..2.857142857142857).contains(&(dataf[idx].abs() as f64)) {
+                assert!(
+                    (gotf[idx] - want).abs() <= 1e-6,
+                    "f32 erfc tail at idx {idx}: {} vs {want}",
+                    gotf[idx]
+                );
+            } else {
+                assert_eq!(gotf[idx].to_bits(), want.to_bits(), "f32 erfc at idx {idx}");
+            }
         }
         for &x in &[0.0_f64, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
             let xi = Value::Tensor(

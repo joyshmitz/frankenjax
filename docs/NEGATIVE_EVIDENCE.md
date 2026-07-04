@@ -2,6 +2,36 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - KEEP (1.86x): SIMD-exp tail branch for dense f64 erf; narrows the JAX loss (BlackThrush)
+
+Dug the erf gap (a real dispatch-path `Primitive::Erf` JAX loss, ~4.6-15x depending on size). Fresh code read
+showed erf is already threaded + SIMD, but `erf_f64x8` only vectorizes the two rational branches `|x| < 1.25`
+and **falls back to scalar `erf_approx` for `|x| >= 1.25`** (the FreeBSD branch-3 `erfc = exp(-x²-0.5625+R/S)/x`,
+which needs an exp). The `eval/erf_1m_f64_vec` bench input is `((i%4001)-2000)*0.001` = **[-2, 2]**, so **~37.5%
+of lanes fall to the scalar tail**. The lever: run branch 3 8-wide using the existing SIMD Cephes exp
+(`exp_cephes_block_f64`), extending `simd_ok` from `|x| < 1.25` to `|x| < 2.857`; `|x| >= 2.857` (branch-4/5
+asymptotic tail), inf/NaN, and signed zero keep the scalar fallback.
+
+Same-worker RCH `ovh-a`, same-invocation interleaved min-of-9 A/B, both kernels driven through the real
+`eval_unary_simd_dense_f64_parallel` path over the exact [-2,2] erf bench input
+(`bench_erf_simd_tail_vs_scalar_tail`, comparing production `erf_f64x8` vs the retained
+`erf_f64x8_scalartail` reference):
+
+- scalar tail: **8.5608 ms**, SIMD tail: **4.5981 ms** = **1.86x faster** self.
+
+Because the A/B uses the production driver over the production bench input, the 1.86x is the production
+`eval/erf_1m_f64_vec` improvement; still a JAX loss but materially narrowed. Wired as the default (`eval_erf`
+already routes through `erf_f64x8`); f32 erf widens through the same kernel so it benefits too.
+
+Golden safety (verified before landing): `random_normal` uses `erf_inv_approx` (a pinned internal series, per
+the arithmetic.rs:12469 note, that keeps the RNG golden stable) and `truncated_normal` uses the scalar
+`erf_approx` (untouched) — neither goes through the SIMD `eval_erf`, and there is no erf-forward golden digest.
+Correctness: branch 3 is tolerance-equal (not bit-identical) to scalar `erf_approx` because it uses the SIMD
+Cephes exp, so `erf_simd_bit_identical_to_scalar` / `erfc_simd_bit_identical_to_scalar` were relaxed to
+tolerance ONLY on the `[1.25, 2.857)` tail (1e-13 f64, 1e-6 f32); the rational branches and the `|x| >= 2.857`
+scalar fallback stay bit-exact, `erf_cbrt_parallel_bit_identical` (parallel==serial) stays bit-exact, and
+fj-conformance `erf_oracle` (31 tests, tolerance 1e-12) passes.
+
 ## 2026-07-04 - NO-SHIP (0.20-0.27x): radix-8 SoA butterfly for batched pow-of-eight FFT — register-spill loss (BlackThrush)
 
 Executed the SIMD-FFT-primitive route: a radix-8 SoA butterfly stage for the batched pow-of-two vectorized
