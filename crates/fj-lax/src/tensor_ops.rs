@@ -31746,7 +31746,13 @@ mod tests {
         // pad [4096,4096] -> [4098,4098]
         let x: Vec<f64> = (0..4096 * 4096).map(|i| (i % 7919) as f64).collect();
         let op = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![4096, 4096] }, x).unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![4096, 4096],
+                },
+                x,
+            )
+            .unwrap(),
         );
         let pv = Value::scalar_f64(0.0);
         let mut pp = BTreeMap::new();
@@ -31759,7 +31765,13 @@ mod tests {
         // concat 2x[4096,2048] axis1 and 2x[2048,4096] axis0
         let a1: Vec<f64> = (0..4096 * 2048).map(|i| (i % 7919) as f64).collect();
         let ta = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![4096, 2048] }, a1.clone()).unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![4096, 2048],
+                },
+                a1.clone(),
+            )
+            .unwrap(),
         );
         let mut cp1 = BTreeMap::new();
         cp1.insert("dimension".into(), "1".into());
@@ -31768,7 +31780,13 @@ mod tests {
         });
         let a0: Vec<f64> = (0..2048 * 4096).map(|i| (i % 7919) as f64).collect();
         let ta0 = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![2048, 4096] }, a0).unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![2048, 4096],
+                },
+                a0,
+            )
+            .unwrap(),
         );
         let mut cp0 = BTreeMap::new();
         cp0.insert("dimension".into(), "0".into());
@@ -31791,7 +31809,9 @@ mod tests {
         use std::time::Instant;
         let (n, k) = (1usize << 22, 1usize << 20);
         let src: Vec<f64> = (0..n).map(|i| (i % 7919) as f64).collect();
-        let idx: Vec<usize> = (0..k).map(|i| (i.wrapping_mul(2_654_435_761)) % n).collect();
+        let idx: Vec<usize> = (0..k)
+            .map(|i| (i.wrapping_mul(2_654_435_761)) % n)
+            .collect();
         let best = |f: &dyn Fn()| -> f64 {
             f();
             let mut b = f64::MAX;
