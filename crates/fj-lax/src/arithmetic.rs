@@ -32016,12 +32016,21 @@ mod tests {
                 eval_igamma(Primitive::Igamma, &[tiga.clone(), tigx.clone()]).unwrap(),
             );
         });
+        // igammac (upper incomplete gamma Q(a,x)) — JAX gammaincc is even slower than gammainc:
+        // 1563ms/1M f64 (min-of-7). Same threaded binary peer in fj. Biggest XLA-weak member.
+        let igc = best(&|| {
+            std::hint::black_box(
+                eval_igammac(Primitive::Igammac, &[tiga.clone(), tigx.clone()]).unwrap(),
+            );
+        });
         println!(
-            "[special vs JAX 1M f64] betainc={:.1}ms (JAX 2639, {:.1}x) | igamma={:.1}ms (JAX 2192, {:.1}x)",
+            "[special vs JAX 1M f64] betainc={:.1}ms (JAX 2639, {:.1}x) | igamma={:.1}ms (JAX 2192, {:.1}x) | igammac={:.1}ms (JAX 1563, {:.1}x)",
             bt * 1e3,
             2639.0 / (bt * 1e3),
             ig * 1e3,
             2192.0 / (ig * 1e3),
+            igc * 1e3,
+            1563.0 / (igc * 1e3),
         );
     }
 
