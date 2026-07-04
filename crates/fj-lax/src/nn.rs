@@ -589,6 +589,87 @@ pub fn euclidean_distance_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> 
     result
 }
 
+/// Pearson correlation of a single pair of rows,
+/// `Σ((a-ma)(b-mb)) / (√Σ(a-ma)² · √Σ(b-mb)²)` where `ma=mean(a)`, `mb=mean(b)` — i.e. the cosine
+/// similarity of the CENTERED vectors. Bit-identical to the decomposed
+/// `ReduceSum→Div(mean_a) | Bcast | Sub(ca) | ReduceSum→Div(mean_b) | Bcast | Sub(cb) |
+///  Mul(ca,cb)→ReduceSum(cov) | Mul(ca,ca)→ReduceSum→Sqrt | Mul(cb,cb)→ReduceSum→Sqrt |
+///  Mul(denom) → Div` graph: pass 1 is an index-order sum / n for each mean (matches
+/// `ReduceSum`+`Div`); pass 2 accumulates cov/‖ca‖²/‖cb‖² as three INDEPENDENT index-order sums
+/// (each an independent left-fold == the three separate `ReduceSum`s), recomputing `a[i]-ma` /
+/// `b[i]-mb` per element (deterministic → identical bits to the materialized `Sub`). `Sqrt` =
+/// `f64::sqrt` (IEEE-exact, same as the `Sqrt` primitive).
+fn pearson_correlation_row(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let mut sum_a = 0.0;
+    let mut sum_b = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        sum_a += av;
+        sum_b += bv;
+    }
+    let mean_a = sum_a / n;
+    let mean_b = sum_b / n;
+    let mut cov = 0.0;
+    let mut var_a = 0.0;
+    let mut var_b = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        let ca = av - mean_a;
+        let cb = bv - mean_b;
+        cov += ca * cb;
+        var_a += ca * ca;
+        var_b += cb * cb;
+    }
+    cov / (var_a.sqrt() * var_b.sqrt())
+}
+
+/// Pearson correlation coefficient along the last axis of two 2D arrays, one scalar per row
+/// (the standard statistic for linear association of two feature rows). ROW-PARALLEL and
+/// BIT-IDENTICAL to the decomposed centered-cosine graph (index-order reductions via
+/// [`pearson_correlation_row`]); rows are independent so only the outer loop is threaded, above the
+/// `softmax_2d_thread_count` work gate. Used by the interpreter Pearson superinstruction. Callers
+/// guarantee `a`/`b` share the same `rows,cols` layout.
+#[must_use]
+pub fn pearson_correlation_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D pearson_correlation a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D pearson_correlation b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = pearson_correlation_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = pearson_correlation_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Manhattan (L1) distance of a single pair of rows, `Σ|a-b|`, bit-identical to the decomposed
 /// `Sub -> Abs -> ReduceSum` graph: an index-order sum of `(a[i]-b[i]).abs()`.
 fn manhattan_distance_row(a: &[f64], b: &[f64]) -> f64 {

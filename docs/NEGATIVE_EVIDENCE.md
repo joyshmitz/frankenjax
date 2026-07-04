@@ -2,6 +2,48 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 19.38x vs ORIG: row-wise Pearson correlation recognized as a fused (row-parallel) 2-input interpreter superinstruction — BIGGEST of the session (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::pearson_correlation_2d`).
+  The Pearson correlation coefficient `r(a,b) = Σ((a-ma)(b-mb)) / (√Σ(a-ma)² · √Σ(b-mb)²)`
+  (`ma=mean(a)`, `mb=mean(b)`) along the last axis — the standard linear-association statistic, =
+  cosine similarity of the CENTERED rows. Distinct from cosine (centered) and euclidean/Manhattan
+  (distance). An 18-equation, TWO-input graph (two means → two centerings → covariance reduction + two
+  centered-norm reductions + normalize), f64 [rows,cols]×2 → [rows] (rank-reducing). NO transcendentals
+  (`Sqrt`=`f64::sqrt`, IEEE-exact). The general fuser cannot fuse it (FIVE reductions break the
+  elementwise fuser), so the decomposed path materializes ~6 full [rows,cols] intermediates.
+- LEVER: a top-level 2-input superinstruction for the exact 18-eq finite dense f64 Pearson graph,
+  computed via the row-parallel `pearson_correlation_2d`. BIT-IDENTICAL: `pearson_correlation_row`
+  does pass-1 index-order sums / n for the two means (matches `ReduceSum`+`Div`), then pass-2
+  accumulates cov/‖ca‖²/‖cb‖² as three INDEPENDENT index-order sums (each an independent left-fold ==
+  the three separate `ReduceSum`s), recomputing `a[i]-ma` / `b[i]-mb` per element (deterministic →
+  identical bits to the materialized `Sub`). Both mean divisors validated `== cols` (as f64, `to_bits`);
+  both broadcasts must restore `rows,cols`; the `Mul(ca,ca)`/`Mul(cb,cb)` require the same var on both
+  operands; `Div` numerator enforced = cov; the cov/denom `Mul`s are commutative (either order).
+- KEY (BIGGEST multiple of the session, 19.38x — beats var 13.38x): confirms and EXTENDS the
+  transcendental-free-reduction thesis — no transcendental → the fused kernel is pure two-pass
+  arithmetic → **5.23 ms** (row-parallel), while the decomposed path pays full dispatch to materialize
+  ~6 [rows,cols] matrices + 5 reductions + 2 sqrt → 101 ms. BIGGER transcendental-free graphs give
+  BIGGER multiples (Pearson 18-eq/19.4x > cosine 10-eq/9.6x > var 7-eq/13.4x* — *var's fewer ops offset
+  by a smaller fused kernel).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed pearson -m 3 -s 20`,
+  4096x1024, a=softmax_input / b=layer_norm_input; TIGHT CIs → low variance):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/pearson_correlation_2d/orig_decomposed_4096x1024` | 101.28 ms |
+  | `compiled_dispatch/pearson_correlation_2d/fast_eval_jaxpr_4096x1024` | 5.2255 ms |
+
+  Ratio vs ORIG: **0.052x time / 19.38x faster** (worst-case CI 19.11x, best 19.67x; robustly ≥2x).
+- VALIDATION: `eval_top_level_pearson_correlation_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on random f64; nonfinite falls through); fj-lax `nn::` 61/61 GREEN; all 18
+  superinstruction parity tests GREEN. Landed cleanly after resolving a concurrent-WIP collision:
+  SlateBridge's uncommitted Manhattan-L1 lived in the same shared working-tree files; I waited for its
+  commit (eecce08e), synced, then added Pearson to the clean tree (no clobber). Pre-existing INDEPENDENT
+  RED (NOT this change): fj-interpreters `scalar_arena_transcendentals_bit_identical_to_generic` on
+  `Cbrt(-5)` — this diff touches no cbrt/arena code.
+
 ## 2026-07-04 - WIN 6.52x vs ORIG: row-wise Manhattan (L1) distance recognized as a fused 2-input interpreter superinstruction (SlateBridge)
 
 - Agent: SlateBridge. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::manhattan_distance_2d`).

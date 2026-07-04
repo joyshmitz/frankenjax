@@ -1138,6 +1138,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_pearson_correlation_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_manhattan_distance_2d_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -2412,6 +2416,213 @@ fn try_eval_top_level_euclidean_distance_2d_f64(
     }
 
     let output = fj_lax::nn::euclidean_distance_2d(a_v, b_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise Pearson correlation coefficient
+/// `Σ((a-ma)(b-mb)) / (√Σ(a-ma)² · √Σ(b-mb)²)` (`ma=mean(a)`, `mb=mean(b)`) along the last axis —
+/// the standard linear-association statistic, = cosine similarity of the CENTERED rows. An 18-equation,
+/// TWO-input graph: `ReduceSum(a)→Div(n)→Bcast→Sub(ca)`, `ReduceSum(b)→Div(n)→Bcast→Sub(cb)`,
+/// `Mul(ca,cb)→ReduceSum(cov)`, `Mul(ca,ca)→ReduceSum→Sqrt`, `Mul(cb,cb)→ReduceSum→Sqrt`,
+/// `Mul(denom)→Div`. Two f64 [rows,cols] inputs, one [rows] output (rank-reducing). NO transcendentals
+/// (`Sqrt`=`f64::sqrt`, IEEE-exact). The general fuser cannot fuse it (five reductions break the
+/// elementwise fuser); the decomposed path materializes ~6 full [rows,cols] intermediates. Fused via
+/// the row-parallel `pearson_correlation_2d`, whose index-order means + centered-product sums match
+/// the graph bit-for-bit; finite dense rank-2 f64 only, else falls through.
+fn try_eval_top_level_pearson_correlation_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 18
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let a = jaxpr.invars[0];
+    let b = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [
+        sa_eq,
+        ma_eq,
+        ma_b_eq,
+        ca_eq,
+        sb_eq,
+        mb_eq,
+        mb_b_eq,
+        cb_eq,
+        cov_mul_eq,
+        cov_eq,
+        va_mul_eq,
+        va_eq,
+        na_eq,
+        vb_mul_eq,
+        vb_eq,
+        nb_eq,
+        denom_eq,
+        div_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    // ma = ReduceSum(a, axis=1) / n
+    let sa = single_output_for_param_primitive(sa_eq, Primitive::ReduceSum)?;
+    if sa_eq.inputs.as_slice() != [Atom::Var(a)] || !axis1_reduce_params(&sa_eq.params) {
+        return None;
+    }
+    let ma = single_output_for_primitive(ma_eq, Primitive::Div)?;
+    let [Atom::Var(ma_num), ma_div] = ma_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *ma_num != sa {
+        return None;
+    }
+    let ma_b = single_output_for_param_primitive(ma_b_eq, Primitive::BroadcastInDim)?;
+    if ma_b_eq.inputs.as_slice() != [Atom::Var(ma)]
+        || !rank2_axis0_broadcast_params(&ma_b_eq.params)
+    {
+        return None;
+    }
+    let ca = single_output_for_primitive(ca_eq, Primitive::Sub)?;
+    if ca_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(ma_b)] {
+        return None;
+    }
+
+    // mb = ReduceSum(b, axis=1) / n
+    let sb = single_output_for_param_primitive(sb_eq, Primitive::ReduceSum)?;
+    if sb_eq.inputs.as_slice() != [Atom::Var(b)] || !axis1_reduce_params(&sb_eq.params) {
+        return None;
+    }
+    let mb = single_output_for_primitive(mb_eq, Primitive::Div)?;
+    let [Atom::Var(mb_num), mb_div] = mb_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *mb_num != sb {
+        return None;
+    }
+    let mb_b = single_output_for_param_primitive(mb_b_eq, Primitive::BroadcastInDim)?;
+    if mb_b_eq.inputs.as_slice() != [Atom::Var(mb)]
+        || !rank2_axis0_broadcast_params(&mb_b_eq.params)
+    {
+        return None;
+    }
+    let cb = single_output_for_primitive(cb_eq, Primitive::Sub)?;
+    if cb_eq.inputs.as_slice() != [Atom::Var(b), Atom::Var(mb_b)] {
+        return None;
+    }
+
+    // cov = ReduceSum(ca * cb) (Mul commutative → either operand order)
+    let cov_prod = single_output_for_primitive(cov_mul_eq, Primitive::Mul)?;
+    let cov_mul_ok = matches!(
+        cov_mul_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)] if (*x == ca && *y == cb) || (*x == cb && *y == ca)
+    );
+    if !cov_mul_ok {
+        return None;
+    }
+    let cov = single_output_for_param_primitive(cov_eq, Primitive::ReduceSum)?;
+    if cov_eq.inputs.as_slice() != [Atom::Var(cov_prod)] || !axis1_reduce_params(&cov_eq.params) {
+        return None;
+    }
+
+    // ‖ca‖ = Sqrt(ReduceSum(ca * ca))
+    let va_prod = single_output_for_primitive(va_mul_eq, Primitive::Mul)?;
+    if va_mul_eq.inputs.as_slice() != [Atom::Var(ca), Atom::Var(ca)] {
+        return None;
+    }
+    let va = single_output_for_param_primitive(va_eq, Primitive::ReduceSum)?;
+    if va_eq.inputs.as_slice() != [Atom::Var(va_prod)] || !axis1_reduce_params(&va_eq.params) {
+        return None;
+    }
+    let na = single_output_for_primitive(na_eq, Primitive::Sqrt)?;
+    if na_eq.inputs.as_slice() != [Atom::Var(va)] {
+        return None;
+    }
+
+    // ‖cb‖ = Sqrt(ReduceSum(cb * cb))
+    let vb_prod = single_output_for_primitive(vb_mul_eq, Primitive::Mul)?;
+    if vb_mul_eq.inputs.as_slice() != [Atom::Var(cb), Atom::Var(cb)] {
+        return None;
+    }
+    let vb = single_output_for_param_primitive(vb_eq, Primitive::ReduceSum)?;
+    if vb_eq.inputs.as_slice() != [Atom::Var(vb_prod)] || !axis1_reduce_params(&vb_eq.params) {
+        return None;
+    }
+    let nb = single_output_for_primitive(nb_eq, Primitive::Sqrt)?;
+    if nb_eq.inputs.as_slice() != [Atom::Var(vb)] {
+        return None;
+    }
+
+    // denom = ‖ca‖ · ‖cb‖ (Mul commutative → either order)
+    let denom = single_output_for_primitive(denom_eq, Primitive::Mul)?;
+    let denom_ok = matches!(
+        denom_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)] if (*x == na && *y == nb) || (*x == nb && *y == na)
+    );
+    if !denom_ok {
+        return None;
+    }
+    // out = cov / denom (Div non-commutative → numerator = cov)
+    let quotient = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if quotient != out || div_eq.inputs.as_slice() != [Atom::Var(cov), Atom::Var(denom)] {
+        return None;
+    }
+
+    let Value::Tensor(a_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(b_t) = &args[1] else {
+        return None;
+    };
+    if a_t.dtype != DType::F64
+        || b_t.dtype != DType::F64
+        || a_t.shape.dims.len() != 2
+        || b_t.shape.dims != a_t.shape.dims
+    {
+        return None;
+    }
+    let rows = a_t.shape.dims[0] as usize;
+    let cols = a_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    // Both means divide by the row length `n = cols` (as f64), matching `pearson_correlation_row`.
+    let n_bits = (cols as f64).to_bits();
+    if f64_literal(ma_div)?.to_bits() != n_bits || f64_literal(mb_div)?.to_bits() != n_bits {
+        return None;
+    }
+    let expected_shape = format!("{rows},{cols}");
+    if ma_b_eq.params.get("shape").map(String::as_str) != Some(expected_shape.as_str())
+        || mb_b_eq.params.get("shape").map(String::as_str) != Some(expected_shape.as_str())
+    {
+        return None;
+    }
+
+    let a_v = a_t.elements.as_f64_slice()?;
+    let b_v = b_t.elements.as_f64_slice()?;
+    if !a_v.iter().all(|value| value.is_finite()) || !b_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::pearson_correlation_2d(a_v, b_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -21013,6 +21224,137 @@ mod tests {
             .expect("nonfinite manhattan falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite manhattan");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_pearson_correlation_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+        let a = VarId(1);
+        let b = VarId(2);
+        let sa = VarId(3);
+        let ma = VarId(4);
+        let ma_b = VarId(5);
+        let ca = VarId(6);
+        let sb = VarId(7);
+        let mb = VarId(8);
+        let mb_b = VarId(9);
+        let cb = VarId(10);
+        let cov_prod = VarId(11);
+        let cov = VarId(12);
+        let va_prod = VarId(13);
+        let va = VarId(14);
+        let na = VarId(15);
+        let vb_prod = VarId(16);
+        let vb = VarId(17);
+        let nb = VarId(18);
+        let denom = VarId(19);
+        let out = VarId(20);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        let bcast = BTreeMap::from([
+            ("shape".to_owned(), format!("{rows},{cols}")),
+            ("broadcast_dimensions".to_owned(), "0".to_owned()),
+        ]);
+        let n = Literal::from_f64(cols as f64);
+        let unary = |prim: Primitive, input: VarId, o: VarId| Equation {
+            primitive: prim,
+            inputs: smallvec![Atom::Var(input)],
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let binary = |prim: Primitive, l: Atom, r: Atom, o: VarId| Equation {
+            primitive: prim,
+            inputs: smallvec![l, r],
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let reduce = |input: VarId, o: VarId| Equation {
+            primitive: Primitive::ReduceSum,
+            inputs: smallvec![Atom::Var(input)],
+            outputs: smallvec![o],
+            params: reduce_axis1.clone(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let broadcast = |input: VarId, o: VarId| Equation {
+            primitive: Primitive::BroadcastInDim,
+            inputs: smallvec![Atom::Var(input)],
+            outputs: smallvec![o],
+            params: bcast.clone(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![
+                reduce(a, sa),
+                binary(Primitive::Div, Atom::Var(sa), Atom::Lit(n), ma),
+                broadcast(ma, ma_b),
+                binary(Primitive::Sub, Atom::Var(a), Atom::Var(ma_b), ca),
+                reduce(b, sb),
+                binary(Primitive::Div, Atom::Var(sb), Atom::Lit(n), mb),
+                broadcast(mb, mb_b),
+                binary(Primitive::Sub, Atom::Var(b), Atom::Var(mb_b), cb),
+                binary(Primitive::Mul, Atom::Var(ca), Atom::Var(cb), cov_prod),
+                reduce(cov_prod, cov),
+                binary(Primitive::Mul, Atom::Var(ca), Atom::Var(ca), va_prod),
+                reduce(va_prod, va),
+                unary(Primitive::Sqrt, va, na),
+                binary(Primitive::Mul, Atom::Var(cb), Atom::Var(cb), vb_prod),
+                reduce(vb_prod, vb),
+                unary(Primitive::Sqrt, vb, nb),
+                binary(Primitive::Mul, Atom::Var(na), Atom::Var(nb), denom),
+                binary(Primitive::Div, Atom::Var(cov), Atom::Var(denom), out),
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_pearson_correlation_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let a_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.29).sin() * 4.0 - 1.0)
+            .collect();
+        let b_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.13).cos() * 2.5 + 0.75)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let a = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_data).expect("a input"),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, b_data).expect("b input"),
+        );
+        let jaxpr = make_pearson_correlation_2d_jaxpr(rows, cols);
+
+        let fast = eval_jaxpr(&jaxpr, &[a.clone(), b.clone()]).expect("fast pearson");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[a, b]).expect("generic pearson");
+        assert_eq!(fast, generic);
+
+        let mut a_nonfinite: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        a_nonfinite[cols + 1] = f64::NAN;
+        let a_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_nonfinite)
+                .expect("nonfinite a"),
+        );
+        let b_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols)
+                    .map(|idx| idx as f64 * 0.02 + 0.1)
+                    .collect(),
+            )
+            .expect("finite b"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()])
+            .expect("nonfinite pearson falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite pearson");
         assert_eq!(through_eval, through_generic);
     }
 

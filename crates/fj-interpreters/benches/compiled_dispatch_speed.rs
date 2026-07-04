@@ -679,6 +679,92 @@ fn build_manhattan_distance_2d_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_pearson_correlation_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+    let a = VarId(1);
+    let b = VarId(2);
+    let sa = VarId(3);
+    let ma = VarId(4);
+    let ma_b = VarId(5);
+    let ca = VarId(6);
+    let sb = VarId(7);
+    let mb = VarId(8);
+    let mb_b = VarId(9);
+    let cb = VarId(10);
+    let cov_prod = VarId(11);
+    let cov = VarId(12);
+    let va_prod = VarId(13);
+    let va = VarId(14);
+    let na = VarId(15);
+    let vb_prod = VarId(16);
+    let vb = VarId(17);
+    let nb = VarId(18);
+    let denom = VarId(19);
+    let out = VarId(20);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let n = Literal::from_f64(cols as f64);
+    let unary = |prim: Primitive, input: VarId, o: VarId| Equation {
+        primitive: prim,
+        inputs: smallvec::smallvec![Atom::Var(input)],
+        outputs: smallvec::smallvec![o],
+        params: BTreeMap::new(),
+        effects: vec![],
+        sub_jaxprs: vec![],
+    };
+    let binary = |prim: Primitive, l: Atom, r: Atom, o: VarId| Equation {
+        primitive: prim,
+        inputs: smallvec::smallvec![l, r],
+        outputs: smallvec::smallvec![o],
+        params: BTreeMap::new(),
+        effects: vec![],
+        sub_jaxprs: vec![],
+    };
+    let reduce = |input: VarId, o: VarId| Equation {
+        primitive: Primitive::ReduceSum,
+        inputs: smallvec::smallvec![Atom::Var(input)],
+        outputs: smallvec::smallvec![o],
+        params: reduce_axis1.clone(),
+        effects: vec![],
+        sub_jaxprs: vec![],
+    };
+    let broadcast = |input: VarId, o: VarId| Equation {
+        primitive: Primitive::BroadcastInDim,
+        inputs: smallvec::smallvec![Atom::Var(input)],
+        outputs: smallvec::smallvec![o],
+        params: bcast.clone(),
+        effects: vec![],
+        sub_jaxprs: vec![],
+    };
+    Jaxpr::new(
+        vec![a, b],
+        vec![],
+        vec![out],
+        vec![
+            reduce(a, sa),
+            binary(Primitive::Div, Atom::Var(sa), Atom::Lit(n), ma),
+            broadcast(ma, ma_b),
+            binary(Primitive::Sub, Atom::Var(a), Atom::Var(ma_b), ca),
+            reduce(b, sb),
+            binary(Primitive::Div, Atom::Var(sb), Atom::Lit(n), mb),
+            broadcast(mb, mb_b),
+            binary(Primitive::Sub, Atom::Var(b), Atom::Var(mb_b), cb),
+            binary(Primitive::Mul, Atom::Var(ca), Atom::Var(cb), cov_prod),
+            reduce(cov_prod, cov),
+            binary(Primitive::Mul, Atom::Var(ca), Atom::Var(ca), va_prod),
+            reduce(va_prod, va),
+            unary(Primitive::Sqrt, va, na),
+            binary(Primitive::Mul, Atom::Var(cb), Atom::Var(cb), vb_prod),
+            reduce(vb_prod, vb),
+            unary(Primitive::Sqrt, vb, nb),
+            binary(Primitive::Mul, Atom::Var(na), Atom::Var(nb), denom),
+            binary(Primitive::Div, Atom::Var(cov), Atom::Var(denom), out),
+        ],
+    )
+}
+
 fn build_cosine_similarity_2d_jaxpr() -> Jaxpr {
     let a = VarId(1);
     let b = VarId(2);
@@ -1380,6 +1466,52 @@ fn eval_manhattan_distance_2d_decomposed(a: &Value, b: &Value) -> Value {
     .expect("sum abs")
 }
 
+fn eval_pearson_correlation_2d_decomposed(a: &Value, b: &Value, rows: usize, cols: usize) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let empty = BTreeMap::new();
+    let n = Value::scalar_f64(cols as f64);
+    let sa = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(a), &reduce_axis1)
+        .expect("sum a");
+    let ma = eval_primitive(Primitive::Div, &[sa, n.clone()], &empty).expect("mean a");
+    let ma_b = eval_primitive(Primitive::BroadcastInDim, &[ma], &bcast).expect("bcast ma");
+    let ca = eval_primitive(Primitive::Sub, &[a.clone(), ma_b], &empty).expect("center a");
+    let sb = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(b), &reduce_axis1)
+        .expect("sum b");
+    let mb = eval_primitive(Primitive::Div, &[sb, n], &empty).expect("mean b");
+    let mb_b = eval_primitive(Primitive::BroadcastInDim, &[mb], &bcast).expect("bcast mb");
+    let cb = eval_primitive(Primitive::Sub, &[b.clone(), mb_b], &empty).expect("center b");
+    let cov_prod =
+        eval_primitive(Primitive::Mul, &[ca.clone(), cb.clone()], &empty).expect("ca*cb");
+    let cov = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&cov_prod),
+        &reduce_axis1,
+    )
+    .expect("cov");
+    let va_prod = eval_primitive(Primitive::Mul, &[ca.clone(), ca], &empty).expect("ca*ca");
+    let va = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&va_prod),
+        &reduce_axis1,
+    )
+    .expect("var a");
+    let na = eval_primitive(Primitive::Sqrt, std::slice::from_ref(&va), &empty).expect("norm a");
+    let vb_prod = eval_primitive(Primitive::Mul, &[cb.clone(), cb], &empty).expect("cb*cb");
+    let vb = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&vb_prod),
+        &reduce_axis1,
+    )
+    .expect("var b");
+    let nb = eval_primitive(Primitive::Sqrt, std::slice::from_ref(&vb), &empty).expect("norm b");
+    let denom = eval_primitive(Primitive::Mul, &[na, nb], &empty).expect("denom");
+    eval_primitive(Primitive::Div, &[cov, denom], &empty).expect("pearson")
+}
+
 fn eval_cosine_similarity_2d_decomposed(a: &Value, b: &Value) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let empty = BTreeMap::new();
@@ -1990,6 +2122,23 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     group.bench_function("manhattan_distance_2d/fast_eval_jaxpr_4096x1024", |b| {
         b.iter(|| {
             black_box(eval_jaxpr(black_box(&manhattan_jaxpr), black_box(&manhattan_args)).unwrap())
+        })
+    });
+    let pearson_jaxpr = build_pearson_correlation_2d_jaxpr(rows, cols);
+    let pearson_args = [softmax_input.clone(), layer_norm_input.clone()];
+    group.bench_function("pearson_correlation_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_pearson_correlation_2d_decomposed(
+                black_box(&pearson_args[0]),
+                black_box(&pearson_args[1]),
+                rows,
+                cols,
+            ))
+        })
+    });
+    group.bench_function("pearson_correlation_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_jaxpr(black_box(&pearson_jaxpr), black_box(&pearson_args)).unwrap())
         })
     });
     let cosine_jaxpr = build_cosine_similarity_2d_jaxpr();
