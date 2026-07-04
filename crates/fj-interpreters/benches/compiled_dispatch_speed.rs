@@ -268,6 +268,122 @@ fn build_log_softmax_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     )
 }
 
+fn build_softmax_cross_entropy_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+    let logits = VarId(1);
+    let labels = VarId(2);
+    let max = VarId(3);
+    let max_b = VarId(4);
+    let shifted = VarId(5);
+    let exp = VarId(6);
+    let sum = VarId(7);
+    let logv = VarId(8);
+    let log_b = VarId(9);
+    let ls = VarId(10);
+    let prod = VarId(11);
+    let ce_sum = VarId(12);
+    let out = VarId(13);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    Jaxpr::new(
+        vec![logits, labels],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::ReduceMax,
+                inputs: smallvec::smallvec![Atom::Var(logits)],
+                outputs: smallvec::smallvec![max],
+                params: reduce_axis1.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::BroadcastInDim,
+                inputs: smallvec::smallvec![Atom::Var(max)],
+                outputs: smallvec::smallvec![max_b],
+                params: bcast.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(logits), Atom::Var(max_b)],
+                outputs: smallvec::smallvec![shifted],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Exp,
+                inputs: smallvec::smallvec![Atom::Var(shifted)],
+                outputs: smallvec::smallvec![exp],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(exp)],
+                outputs: smallvec::smallvec![sum],
+                params: reduce_axis1.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Log,
+                inputs: smallvec::smallvec![Atom::Var(sum)],
+                outputs: smallvec::smallvec![logv],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::BroadcastInDim,
+                inputs: smallvec::smallvec![Atom::Var(logv)],
+                outputs: smallvec::smallvec![log_b],
+                params: bcast,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(shifted), Atom::Var(log_b)],
+                outputs: smallvec::smallvec![ls],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(labels), Atom::Var(ls)],
+                outputs: smallvec::smallvec![prod],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(prod)],
+                outputs: smallvec::smallvec![ce_sum],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Neg,
+                inputs: smallvec::smallvec![Atom::Var(ce_sum)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_rms_norm_2d_jaxpr(rows: usize, cols: usize, epsilon: f64) -> Jaxpr {
     let x = VarId(1);
     let squared = VarId(2);
@@ -527,6 +643,47 @@ fn eval_log_softmax_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Va
     let logv = eval_primitive(Primitive::Log, std::slice::from_ref(&sum), &empty).expect("log");
     let log_b = eval_primitive(Primitive::BroadcastInDim, &[logv], &bcast).expect("broadcast log");
     eval_primitive(Primitive::Sub, &[shifted, log_b], &empty).expect("subtract log")
+}
+
+fn eval_softmax_cross_entropy_2d_decomposed(
+    logits: &Value,
+    labels: &Value,
+    rows: usize,
+    cols: usize,
+) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let empty = BTreeMap::new();
+    let max = eval_primitive(
+        Primitive::ReduceMax,
+        std::slice::from_ref(logits),
+        &reduce_axis1,
+    )
+    .expect("reduce max");
+    let max_b = eval_primitive(Primitive::BroadcastInDim, &[max], &bcast).expect("broadcast max");
+    let shifted =
+        eval_primitive(Primitive::Sub, &[logits.clone(), max_b], &empty).expect("subtract max");
+    let exp = eval_primitive(Primitive::Exp, std::slice::from_ref(&shifted), &empty).expect("exp");
+    let sum = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&exp),
+        &reduce_axis1,
+    )
+    .expect("reduce sum");
+    let logv = eval_primitive(Primitive::Log, std::slice::from_ref(&sum), &empty).expect("log");
+    let log_b = eval_primitive(Primitive::BroadcastInDim, &[logv], &bcast).expect("broadcast log");
+    let ls = eval_primitive(Primitive::Sub, &[shifted, log_b], &empty).expect("log_softmax");
+    let prod = eval_primitive(Primitive::Mul, &[labels.clone(), ls], &empty).expect("weighted");
+    let ce_sum = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&prod),
+        &reduce_axis1,
+    )
+    .expect("cross entropy sum");
+    eval_primitive(Primitive::Neg, std::slice::from_ref(&ce_sum), &empty).expect("negate")
 }
 
 fn eval_rms_norm_2d_decomposed(input: &Value, rows: usize, cols: usize, epsilon: f64) -> Value {
@@ -948,6 +1105,35 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
                 )
                 .unwrap(),
             )
+        })
+    });
+    let ce_labels_data: Vec<f64> = (0..rows * cols)
+        .map(|idx| ((idx as f64) * 0.0011).cos().abs() * 0.5)
+        .collect();
+    let ce_labels_input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            ce_labels_data,
+        )
+        .expect("cross entropy labels"),
+    );
+    let cross_entropy_jaxpr = build_softmax_cross_entropy_2d_jaxpr(rows, cols);
+    let ce_args = [softmax_input.clone(), ce_labels_input.clone()];
+    group.bench_function("softmax_cross_entropy_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_softmax_cross_entropy_2d_decomposed(
+                black_box(&ce_args[0]),
+                black_box(&ce_args[1]),
+                rows,
+                cols,
+            ))
+        })
+    });
+    group.bench_function("softmax_cross_entropy_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_jaxpr(black_box(&cross_entropy_jaxpr), black_box(&ce_args)).unwrap())
         })
     });
     for &(rows, cols) in &[(4096usize, 1024usize), (16384, 1024)] {

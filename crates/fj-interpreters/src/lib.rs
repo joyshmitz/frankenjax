@@ -1117,6 +1117,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_softmax_cross_entropy_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_scalar_half_arith(jaxpr, const_values, args) {
         return result;
     }
@@ -1774,6 +1778,149 @@ fn try_eval_top_level_rms_norm_2d_f64(
             .map(|value| vec![value])
             .map_err(EvalError::InvalidTensor)
             .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the canonical finite dense rank-2 f64 softmax
+/// cross-entropy loss graph `-Σ labels · log_softmax(logits)` (`optax.softmax_cross_entropy`):
+/// the 8-equation log-softmax subgraph on `logits` (`ReduceMax → Bcast → Sub → Exp →
+/// ReduceSum → Log → Bcast → Sub`) followed by `Mul(labels, ls) → ReduceSum(axis=1) → Neg`.
+/// Two f64 [rows,cols] inputs, one [rows] output. Exact-graph / exact-shape / finite-only;
+/// anything else falls through to the generic interpreter. Fused via the row-parallel
+/// `softmax_cross_entropy_2d`, which reuses the log-softmax superinstruction's bit-exact op
+/// forms (fold-max, index-order exp-sum, `shifted - log` grouping) so it matches the generic
+/// decomposed path bit-for-bit.
+fn try_eval_top_level_softmax_cross_entropy_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 11
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let logits = jaxpr.invars[0];
+    let labels = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [
+        max_eq,
+        max_bcast_eq,
+        sub_eq,
+        exp_eq,
+        sum_eq,
+        log_eq,
+        log_bcast_eq,
+        ls_eq,
+        mul_eq,
+        ce_sum_eq,
+        neg_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    // --- log_softmax(logits) subgraph (identical to the log-softmax superinstruction) ---
+    let max = single_output_for_param_primitive(max_eq, Primitive::ReduceMax)?;
+    if max_eq.inputs.as_slice() != [Atom::Var(logits)] || !axis1_reduce_params(&max_eq.params) {
+        return None;
+    }
+    let max_bcast = single_output_for_param_primitive(max_bcast_eq, Primitive::BroadcastInDim)?;
+    if max_bcast_eq.inputs.as_slice() != [Atom::Var(max)]
+        || !rank2_axis0_broadcast_params(&max_bcast_eq.params)
+    {
+        return None;
+    }
+    let shifted = single_output_for_primitive(sub_eq, Primitive::Sub)?;
+    if sub_eq.inputs.as_slice() != [Atom::Var(logits), Atom::Var(max_bcast)] {
+        return None;
+    }
+    let exp = single_output_for_primitive(exp_eq, Primitive::Exp)?;
+    if exp_eq.inputs.as_slice() != [Atom::Var(shifted)] {
+        return None;
+    }
+    let sum = single_output_for_param_primitive(sum_eq, Primitive::ReduceSum)?;
+    if sum_eq.inputs.as_slice() != [Atom::Var(exp)] || !axis1_reduce_params(&sum_eq.params) {
+        return None;
+    }
+    let logv = single_output_for_primitive(log_eq, Primitive::Log)?;
+    if log_eq.inputs.as_slice() != [Atom::Var(sum)] {
+        return None;
+    }
+    let log_bcast = single_output_for_param_primitive(log_bcast_eq, Primitive::BroadcastInDim)?;
+    if log_bcast_eq.inputs.as_slice() != [Atom::Var(logv)]
+        || log_bcast_eq.params != max_bcast_eq.params
+    {
+        return None;
+    }
+    let ls = single_output_for_primitive(ls_eq, Primitive::Sub)?;
+    if ls_eq.inputs.as_slice() != [Atom::Var(shifted), Atom::Var(log_bcast)] {
+        return None;
+    }
+
+    // --- cross-entropy tail: -sum(labels * log_softmax, axis=1) ---
+    let prod = single_output_for_primitive(mul_eq, Primitive::Mul)?;
+    if mul_eq.inputs.as_slice() != [Atom::Var(labels), Atom::Var(ls)] {
+        return None;
+    }
+    let ce_sum = single_output_for_param_primitive(ce_sum_eq, Primitive::ReduceSum)?;
+    if ce_sum_eq.inputs.as_slice() != [Atom::Var(prod)] || !axis1_reduce_params(&ce_sum_eq.params) {
+        return None;
+    }
+    let neg = single_output_for_primitive(neg_eq, Primitive::Neg)?;
+    if neg != out || neg_eq.inputs.as_slice() != [Atom::Var(ce_sum)] {
+        return None;
+    }
+
+    let Value::Tensor(logits_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(labels_t) = &args[1] else {
+        return None;
+    };
+    if logits_t.dtype != DType::F64
+        || labels_t.dtype != DType::F64
+        || logits_t.shape.dims.len() != 2
+        || labels_t.shape.dims != logits_t.shape.dims
+    {
+        return None;
+    }
+    let rows = logits_t.shape.dims[0] as usize;
+    let cols = logits_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let expected_shape = format!("{rows},{cols}");
+    if max_bcast_eq.params.get("shape").map(String::as_str) != Some(expected_shape.as_str()) {
+        return None;
+    }
+
+    let logits_v = logits_t.elements.as_f64_slice()?;
+    let labels_v = labels_t.elements.as_f64_slice()?;
+    if !logits_v.iter().all(|value| value.is_finite())
+        || !labels_v.iter().all(|value| value.is_finite())
+    {
+        return None;
+    }
+
+    let output = fj_lax::nn::softmax_cross_entropy_2d(logits_v, labels_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
     )
 }
 
@@ -19588,6 +19735,162 @@ mod tests {
             .expect("nonfinite rms norm falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite rms norm");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_softmax_cross_entropy_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+        let logits = VarId(1);
+        let labels = VarId(2);
+        let max = VarId(3);
+        let max_b = VarId(4);
+        let shifted = VarId(5);
+        let exp = VarId(6);
+        let sum = VarId(7);
+        let logv = VarId(8);
+        let log_b = VarId(9);
+        let ls = VarId(10);
+        let prod = VarId(11);
+        let ce_sum = VarId(12);
+        let out = VarId(13);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        let bcast = BTreeMap::from([
+            ("shape".to_owned(), format!("{rows},{cols}")),
+            ("broadcast_dimensions".to_owned(), "0".to_owned()),
+        ]);
+        Jaxpr::new(
+            vec![logits, labels],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::ReduceMax,
+                    inputs: smallvec![Atom::Var(logits)],
+                    outputs: smallvec![max],
+                    params: reduce_axis1.clone(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::BroadcastInDim,
+                    inputs: smallvec![Atom::Var(max)],
+                    outputs: smallvec![max_b],
+                    params: bcast.clone(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(logits), Atom::Var(max_b)],
+                    outputs: smallvec![shifted],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(shifted)],
+                    outputs: smallvec![exp],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(exp)],
+                    outputs: smallvec![sum],
+                    params: reduce_axis1.clone(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(sum)],
+                    outputs: smallvec![logv],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::BroadcastInDim,
+                    inputs: smallvec![Atom::Var(logv)],
+                    outputs: smallvec![log_b],
+                    params: bcast,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(shifted), Atom::Var(log_b)],
+                    outputs: smallvec![ls],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(labels), Atom::Var(ls)],
+                    outputs: smallvec![prod],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(prod)],
+                    outputs: smallvec![ce_sum],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(ce_sum)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_softmax_cross_entropy_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let logits_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.37).sin() * 8.0 - ((idx % cols) as f64) * 0.125)
+            .collect();
+        let labels_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.19).cos().abs() * 0.3)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let logits = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, logits_data)
+                .expect("logits input"),
+        );
+        let labels = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, labels_data)
+                .expect("labels input"),
+        );
+        let jaxpr = make_softmax_cross_entropy_2d_jaxpr(rows, cols);
+
+        let fast =
+            eval_jaxpr(&jaxpr, &[logits.clone(), labels.clone()]).expect("fast cross entropy");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[logits.clone(), labels.clone()])
+            .expect("generic cross entropy");
+        assert_eq!(fast, generic);
+
+        let mut nonfinite_data: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        nonfinite_data[cols + 1] = f64::NAN;
+        let logits_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims }, nonfinite_data)
+                .expect("nonfinite logits input"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[logits_nf.clone(), labels.clone()])
+            .expect("nonfinite cross entropy falls through");
+        let through_generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[logits_nf, labels])
+            .expect("generic nonfinite cross entropy");
         assert_eq!(through_eval, through_generic);
     }
 

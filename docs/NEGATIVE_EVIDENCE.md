@@ -2,6 +2,38 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 9.63x vs ORIG: softmax cross-entropy loss graph recognized as a fused (threaded) 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::softmax_cross_entropy_2d`). The
+  highest-value member of the superinstruction macro-op vein and genuinely different from the shipped
+  softmax/log_softmax/layer_norm/rms_norm (2 inputs, per-row scalar LOSS output, not a normalization):
+  `-Σ labels · log_softmax(logits)` = `optax.softmax_cross_entropy`, THE training-loop loss in every
+  classifier. Worktree audit found no unlanded measured win (all `.scratch` worktrees stale prunable).
+- LEVER: a top-level superinstruction for the exact 11-equation finite dense rank-2 f64 cross-entropy
+  graph — the 8-eq log-softmax subgraph on `logits` (`ReduceMax → Bcast → Sub → Exp → ReduceSum → Log
+  → Bcast → Sub`) then `Mul(labels, ls) → ReduceSum(axis=1) → Neg` — computed in one row-parallel
+  `softmax_cross_entropy_2d` pass (two f64 [rows,cols] inputs → one [rows] output). BIT-IDENTICAL to
+  the generic path: reuses the log-softmax superinstruction's `shifted - log` grouping + fold-max +
+  index-order exp/sum, then `labels[j]*ls[j]` index-order sum + negate. Exact-graph / exact-shape /
+  finite-only (both inputs); noncanonical or nonfinite programs fall through to the generic interpreter.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed
+  softmax_cross_entropy_2d -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/softmax_cross_entropy_2d/orig_decomposed_4096x1024` | 78.016 ms |
+  | `compiled_dispatch/softmax_cross_entropy_2d/fast_eval_jaxpr_4096x1024` | 8.099 ms |
+
+  Ratio vs ORIG: **0.104x time / 9.63x faster** — the biggest superinstruction win yet, because the
+  11-op decomposed path runs two exp/log passes AND materializes ~10 intermediate 32MB tensors, all of
+  which the single fused row-parallel pass collapses.
+- VALIDATION: `eval_top_level_softmax_cross_entropy_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused == generic bit-for-bit on random 2-input f64; nonfinite logits fall through); all 7
+  superinstruction tests GREEN; fj-lax `nn::` 61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this
+  additive change): fj-interpreters `scalar_arena_transcendentals_bit_identical_to_generic` on
+  `Cbrt(-5)` f64, in the recently-churned arena/native-f32 cbrt area — this diff touches no cbrt/arena.
+
 ## 2026-07-04 - WIN 4.69x vs ORIG: RMSNorm graph recognized as a fused (threaded) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::rms_norm_2d` threaded kernel). Same

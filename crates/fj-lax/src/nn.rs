@@ -540,6 +540,75 @@ pub fn rms_norm_2d(x: &[f64], rows: usize, cols: usize, epsilon: f64) -> Vec<f64
     result
 }
 
+#[inline]
+fn softmax_cross_entropy_row(logits: &[f64], labels: &[f64]) -> f64 {
+    // `-Σ_j labels[j] · log_softmax(logits)[j]`, bit-identical to the decomposed graph:
+    // log_softmax[j] = `(logits[j] - rowmax) - log(Σ exp(shifted))` (the log-softmax
+    // superinstruction's `shifted - log` grouping), then `Mul(labels, ls)` per element, an
+    // index-order `ReduceSum`, and a final `Neg`. Callers guarantee finite input → rowmax finite.
+    let max_val = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mut sum_exp = 0.0;
+    for &value in logits {
+        sum_exp += (value - max_val).exp();
+    }
+    let log_val = sum_exp.ln();
+    let mut s = 0.0;
+    for (&value, &label) in logits.iter().zip(labels.iter()) {
+        s += label * ((value - max_val) - log_val);
+    }
+    -s
+}
+
+/// Softmax cross-entropy loss `-Σ labels · log_softmax(logits)` along the last axis of a 2D
+/// array, one scalar per row (`optax.softmax_cross_entropy`). Row-parallel; bit-for-bit
+/// identical to the decomposed log-softmax → Mul → ReduceSum → Neg jaxpr (same `shifted - log`
+/// grouping + index-order reductions as the log-softmax superinstruction). Used by the
+/// interpreter cross-entropy superinstruction.
+#[must_use]
+pub fn softmax_cross_entropy_2d(logits: &[f64], labels: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D softmax_cross_entropy logits", logits, rows, cols);
+    let _ = checked_2d_row_major_len("2D softmax_cross_entropy labels", labels, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = softmax_cross_entropy_row(
+                &logits[start..start + cols],
+                &labels[start..start + cols],
+            );
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let logits_block = &logits[row0 * cols..(row0 + row_count) * cols];
+            let labels_block = &labels[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = softmax_cross_entropy_row(
+                        &logits_block[start..start + cols],
+                        &labels_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Normalize input to have zero mean and unit variance.
 ///
 /// Matches `jax.nn.standardize(x)` for a 1D array.
