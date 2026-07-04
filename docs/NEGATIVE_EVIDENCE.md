@@ -40,6 +40,47 @@ Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
   fj-interpreters `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff
   touches no cbrt/arena code.
 
+## 2026-07-04 - WIN 5.91x vs ORIG: row-wise mean squared error recognized as a fused 2-input interpreter superinstruction (GreenLake)
+
+- Agent: GreenLake. Crate: `fj-interpreters` (+ row-parallel `fj_lax::nn::mean_squared_error_2d`).
+  Different primitive from the already-landed Euclidean/Manhattan/cosine/Pearson lanes: row-wise MSE =
+  `sum((a - b)^2, axis=1) / cols`, a TWO-input rank-reducing loss metric for regression, reconstruction,
+  and model-error workloads. The exact 4-equation graph is
+  `Sub(a,b) -> Mul(diff,diff) -> ReduceSum(axis=1) -> Div(cols)`, f64 `[rows,cols] x 2 -> [rows]`.
+  The decomposed path materializes two full `[rows,cols]` intermediates before reducing and dividing;
+  the fused path streams each row once and writes one scalar per row.
+- LEVER: a top-level finite dense f64 recognizer for exactly that graph, falling through for
+  consts/effects, wrong arity, shape or dtype mismatch, empty axes, nonfinite values, wrong divisor, or
+  non-matching operand topology. The row kernel preserves graph order: index-order `diff = a[i] - b[i]`,
+  index-order `sum += diff * diff`, then a scalar divide by the same `cols` literal, so the fused and
+  generic paths compare bit-for-bit on the focused parity test.
+- MEASURED per-crate (`AGENT_NAME=GreenLake`, `rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`,
+  worker `ovh-a`, 4096x1024, `a=softmax_input`, `b=layer_norm_input`). The user-requested literal
+  `cargo bench --release -p fj-interpreters ...` spelling was attempted first and Cargo rejected
+  `--release`; `--profile release` is the valid release bench form for this workspace:
+
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed mean_squared_error_2d -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`
+
+  | row | median | (CI low..high) |
+  | --- | ---: | :--- |
+  | `compiled_dispatch/mean_squared_error_2d/orig_decomposed_4096x1024` | 32.966 ms | 32.586..33.530 |
+  | `compiled_dispatch/mean_squared_error_2d/fast_eval_jaxpr_4096x1024` | 5.5788 ms | 5.3409..5.7791 |
+
+  Ratio vs ORIG: **0.169x time / 5.91x faster** (conservative CI ratio 32.586/5.7791 = 5.64x).
+- VALIDATION: `eval_top_level_mean_squared_error_2d_f64_matches_generic_and_preserves_edges` GREEN via
+  `rch exec` on `vmi1149989` (`cargo test -p fj-interpreters --profile release ... -- --nocapture`);
+  `cargo fmt -p fj-interpreters -p fj-lax -- --check` GREEN; `git diff --check` GREEN; `cargo check
+  -p fj-interpreters --all-targets` GREEN via `rch exec` on `ovh-a`; `cargo clippy -p fj-interpreters
+  --all-targets --no-deps -- -D warnings` GREEN via `rch exec` on `hz2`; full local
+  `cargo test -p fj-conformance --profile release` GREEN with tracked artifacts present. Remote
+  `rch exec -- cargo test -p fj-conformance --profile release -- --nocapture` compiled and passed the
+  early conformance/oracle batches but failed `artifact_schemas` because repo `.rchignore` excludes
+  `artifacts/`, so the worker could not see tracked `artifacts/phase2c/...` JSON schema inputs; focused
+  local `cargo test -p fj-conformance --profile release --test artifact_schemas -- --nocapture` passed
+  13/13 against the real artifact tree. Scoped `ubs` over the touched Rust files plus this ledger exits
+  1 on inherited broad panic/indexing/security-heuristic inventories, while its fmt/clippy/check/test-build/
+  audit/deny subchecks are GREEN.
+
 ## 2026-07-04 - WIN 19.38x vs ORIG: row-wise Pearson correlation recognized as a fused (row-parallel) 2-input interpreter superinstruction — BIGGEST of the session (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::pearson_correlation_2d`).

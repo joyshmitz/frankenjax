@@ -589,6 +589,60 @@ pub fn euclidean_distance_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> 
     result
 }
 
+/// Mean squared error of a single pair of rows, `Σ(a - b)² / n`, bit-identical to the decomposed
+/// `Sub -> Mul(square) -> ReduceSum -> Div(n)` graph.
+fn mean_squared_error_row(a: &[f64], b: &[f64]) -> f64 {
+    let mut sum_sq = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        let diff = av - bv;
+        sum_sq += diff * diff;
+    }
+    sum_sq / (a.len() as f64)
+}
+
+/// Mean squared error along the last axis of two 2D arrays, one scalar per row.
+#[must_use]
+pub fn mean_squared_error_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D mean_squared_error a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D mean_squared_error b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = mean_squared_error_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = mean_squared_error_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Pearson correlation of a single pair of rows,
 /// `Σ((a-ma)(b-mb)) / (√Σ(a-ma)² · √Σ(b-mb)²)` where `ma=mean(a)`, `mb=mean(b)` — i.e. the cosine
 /// similarity of the CENTERED vectors. Bit-identical to the decomposed
