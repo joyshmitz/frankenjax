@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 8.09x vs ORIG: row-wise population covariance recognized as a fused (row-parallel) 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::covariance_2d`). Extends the
+  transcendental-FREE statistical-moment lane (variance 13.38x → std 13.79x → skewness 10.40x →
+  kurtosis 15.43x) into its first TWO-input member: row-wise population covariance
+  `cov(a,b) = mean((a-ā)(b-b̄))` (`ddof=0`) — the second cross-moment, and the UN-normalized core of the
+  already-shipped Pearson correlation (`ρ = cov/(σ_a·σ_b)`). An 11-equation, two-input graph
+  `ReduceSum(a) → Div(mean_a) → BroadcastInDim → ReduceSum(b) → Div(mean_b) → BroadcastInDim → Sub(ca) →
+  Sub(cb) → Mul → ReduceSum → Div`, two f64 [rows,cols] inputs → one [rows] output (rank-reducing). NO
+  transcendentals — pure add/sub/mul/div. The general fuser cannot fuse it (the three reductions break
+  the elementwise fuser), so the decomposed path materializes the full [rows,cols] two-centering +
+  product intermediates plus per-reduction Vecs (heavier than the 1-input moments — two source arrays).
+  Worktree audit: HEAD==origin/main (my kurtosis tip d0dacdad), no unlanded win to land.
+- LEVER: a top-level 2-input superinstruction for the exact 11-eq finite dense f64 covariance graph,
+  computed via the row-parallel `covariance_2d`. BIT-IDENTICAL: `covariance_row` does two index-order
+  sums for the two means, then one index-order sum of `(a[i]-ā)·(b[i]-b̄)` — the exact `Sub`/`Sub`/`Mul`
+  products the graph forms — divided by `n`. `Mul(ca,cb)` commutative (either operand order → bit-exact
+  for finite inputs). Reuses the moment-family shape/divisor guards (all THREE `Div` divisors must equal
+  `cols` as f64, both broadcasts restore `rows,cols`, shapes must match); finite dense rank-2 f64 only,
+  else falls through (matching the graph's NaN/Inf propagation via the generic path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed covariance_2d
+  -m 3 -s 20`, 4096x1024, a=softmax_input, b=layer_norm_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/covariance_2d/orig_decomposed_4096x1024` | 94.888 ms |
+  | `compiled_dispatch/covariance_2d/fast_eval_jaxpr_4096x1024` | 11.735 ms |
+
+  Ratio vs ORIG: **0.1237x time / 8.09x faster** (worst-case CI 7.20x, best 9.26x; robustly ≥2x). The
+  decomposed baseline is the biggest of the moment family (94.9 ms) because it re-materializes two full
+  [rows,cols] centerings + their product; the fused row kernel reads both arrays once (11.7 ms).
+- VALIDATION: `eval_top_level_covariance_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path); fj-lax `nn::`
+  61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 15.43x vs ORIG: row-wise population kurtosis recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::kurtosis_2d`). Fourth rung of

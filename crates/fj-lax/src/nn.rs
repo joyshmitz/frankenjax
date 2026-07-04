@@ -660,6 +660,78 @@ pub fn kurtosis_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Population covariance of a single pair of rows, `mean((a-ā)(b-b̄))`, bit-identical to the
+/// decomposed graph: two index-order sums for the two means, then one index-order sum of
+/// `(a[i]-ā)·(b[i]-b̄)` (the exact `Sub`/`Sub`/`Mul` products the graph forms), divided by `n`.
+/// Callers guarantee equal-length non-empty rows.
+fn covariance_row(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let mut suma = 0.0;
+    for &v in a {
+        suma += v;
+    }
+    let mean_a = suma / n;
+    let mut sumb = 0.0;
+    for &v in b {
+        sumb += v;
+    }
+    let mean_b = sumb / n;
+    let mut sump = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        sump += (av - mean_a) * (bv - mean_b);
+    }
+    sump / n
+}
+
+/// Population covariance (`ddof=0`) along the last axis of a 2D array, one scalar per row pairing
+/// (`jax.numpy.mean((a - a.mean(-1, keepdims=True)) * (b - b.mean(-1, keepdims=True)), axis=-1)`).
+/// ROW-PARALLEL and BIT-IDENTICAL to the decomposed graph `ReduceSum → Div(mean_a) → BroadcastInDim →
+/// ReduceSum → Div(mean_b) → BroadcastInDim → Sub → Sub → Mul → ReduceSum → Div`: same index-order
+/// reductions + `sum/n` mean grouping via [`covariance_row`]. Rows are independent so only the outer
+/// loop is threaded, above the `softmax_2d_thread_count` work gate. Used by the interpreter covariance
+/// superinstruction.
+#[must_use]
+pub fn covariance_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D covariance a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D covariance b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = covariance_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = covariance_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
 /// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
 /// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so
