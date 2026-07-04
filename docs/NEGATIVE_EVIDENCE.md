@@ -29,6 +29,31 @@ restricted to 3x3 only; worker changed, so those numbers are routing evidence on
 `cargo test -p fj-lax --profile release direct_simd_rank2_3x3_maxmin_matches_naive_bits --lib -- --nocapture`
 passed on RCH worker `vmi1152480`. Full crate conformance was run separately before landing.
 
+## 2026-07-04 - PARTIAL FIX: rank-3 SUM-pool win5 const-window x-lane unroll is 1.28x faster, but not a clean JAX win (BlackThrush)
+
+Implemented a narrow `reduce_window(sum)` fast path for rank-3 dense f64 VALID windows with
+`window_dimensions=[5,5,5]`: the old generic x-lane kernel kept `win_z/win_y/win_x` as runtime loop bounds, so
+the 125-tap small-window case paid loop overhead that the compiler could not fully unroll. The retained path
+keeps the same x-lane SIMD layout and tap order, but monomorphizes the five x taps.
+
+Same-worker RCH A/B on `hz1` with the new generic-forcing bench row
+`eval/sumpool_96x96x96_win5_f64_vec_generic_xlane` and production row
+`eval/sumpool_96x96x96_win5_f64_vec`:
+
+- `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/frankenjax/.rch-targets/blackthrush rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline 'eval/sumpool_96x96x96_win5_f64_vec' -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`
+- generic x-lane: **6.2732ms** midpoint (`[5.9466ms, 6.4838ms]`)
+- const-win5 x-lane: **4.9039ms** midpoint (`[4.6923ms, 5.1603ms]`)
+- same-worker internal ratio: **1.28x faster**
+
+Absolute JAX ratio remains not a win. The best clean candidate run before the A/B was `ovh-a`
+**1.7914ms** (`[1.7211ms, 1.8742ms]`) versus the existing JAX reference **1.75ms**, i.e. **1.02x
+slower**. The loaded `hz1` same-worker A/B absolute row is **2.80x slower** than that JAX reference, so only
+the same-worker internal ratio is keep-quality. A 4-lane SIMD tail sub-variant was dropped after a routed RCH
+bench produced **9.1790ms** on `vmi1264463`; it had no same-worker keep evidence.
+
+Correctness: `rank3_sum_pool_win5_specialized_matches_xlane_bits` compares the specialized kernel to the old
+generic x-lane kernel with finite bit equality and canonicalized NaN equality.
+
 ## 2026-07-04 - CLOSEOUT: random_uniform 4M f64 is 9.46x faster than JAX/XLA-CPU (BlackThrush)
 
 Fresh strict-remote RCH Criterion proof for a different primitive family from the iterative special-function

@@ -6127,6 +6127,92 @@ fn reduce_window_rank3_f64_sum_xlane(
     out
 }
 
+fn reduce_window_rank3_f64_sum_5x5x5_xlane(
+    src: &[f64],
+    input_dims: [usize; 3],
+    out_dims: [usize; 3],
+) -> Vec<f64> {
+    use std::simd::Simd;
+    type F = Simd<f64, 8>;
+
+    let [_, in_y, in_x] = input_dims;
+    let [out_z, out_y, out_x] = out_dims;
+    let in_z_stride = in_y * in_x;
+    let x8 = out_x - out_x % 8;
+    let rows = out_z * out_y;
+    let mut out = vec![0.0_f64; rows * out_x];
+
+    let fill_rows = |row_start: usize, rows_out: &mut [f64]| {
+        let n_rows = rows_out.len() / out_x;
+        for local_row in 0..n_rows {
+            let row = row_start + local_row;
+            let oz = row / out_y;
+            let oy = row % out_y;
+            let out_base = local_row * out_x;
+            let mut ox = 0usize;
+            while ox < x8 {
+                let mut acc = F::splat(0.0);
+                for wz in 0..5 {
+                    let z_base = (oz + wz) * in_z_stride;
+                    for wy in 0..5 {
+                        let row_base = z_base + (oy + wy) * in_x + ox;
+                        acc += F::from_slice(&src[row_base..row_base + 8]);
+                        acc += F::from_slice(&src[row_base + 1..row_base + 9]);
+                        acc += F::from_slice(&src[row_base + 2..row_base + 10]);
+                        acc += F::from_slice(&src[row_base + 3..row_base + 11]);
+                        acc += F::from_slice(&src[row_base + 4..row_base + 12]);
+                    }
+                }
+                acc.copy_to_slice(&mut rows_out[out_base + ox..out_base + ox + 8]);
+                ox += 8;
+            }
+            while ox < out_x {
+                let mut acc = 0.0_f64;
+                for wz in 0..5 {
+                    let z_base = (oz + wz) * in_z_stride;
+                    for wy in 0..5 {
+                        let row_base = z_base + (oy + wy) * in_x + ox;
+                        acc += src[row_base];
+                        acc += src[row_base + 1];
+                        acc += src[row_base + 2];
+                        acc += src[row_base + 3];
+                        acc += src[row_base + 4];
+                    }
+                }
+                rows_out[out_base + ox] = acc;
+                ox += 1;
+            }
+        }
+    };
+
+    let work = rows.saturating_mul(out_x).saturating_mul(125);
+    let threads = if work >= (1 << 18) && rows >= 2 {
+        crate::arithmetic::work_scaled_threads(work).min(rows)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        fill_rows(0, &mut out);
+        return out;
+    }
+
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let cnt = per.min(rows - row0);
+            let (blk, tail) = rest.split_at_mut(cnt * out_x);
+            rest = tail;
+            let start = row0;
+            row0 += cnt;
+            let f = &fill_rows;
+            scope.spawn(move || f(start, blk));
+        }
+    });
+    out
+}
+
 struct ReduceWindowExtremumAxis {
     axis: usize,
     window: usize,
@@ -10080,12 +10166,19 @@ fn eval_reduce_window(
                     .map_err(EvalError::from)?,
                 ));
             }
-            let values = reduce_window_rank3_f64_sum_xlane(
-                src,
-                input_dims,
-                window_dims_rank3,
-                out_dims_rank3,
-            );
+            // Private Criterion A/B hook used by the generic_xlane bench row.
+            let values = if window_dims_rank3 == [5, 5, 5]
+                && !params.contains_key("__fj_rank3_win5_generic")
+            {
+                reduce_window_rank3_f64_sum_5x5x5_xlane(src, input_dims, out_dims_rank3)
+            } else {
+                reduce_window_rank3_f64_sum_xlane(
+                    src,
+                    input_dims,
+                    window_dims_rank3,
+                    out_dims_rank3,
+                )
+            };
             return Ok(Value::Tensor(
                 TensorValue::new_f64_values(
                     Shape {
@@ -11393,6 +11486,43 @@ mod tests {
                 got.iter().map(|&v| canon(v)).collect::<Vec<_>>(),
                 want.iter().map(|&v| canon(v)).collect::<Vec<_>>(),
                 "rank3 x-lane sumpool mismatch dims={dims:?} win={win:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rank3_sum_pool_win5_specialized_matches_xlane_bits() {
+        let dims = [9usize, 10usize, 19usize];
+        let win = [5usize, 5usize, 5usize];
+        let out_dims = [
+            dims[0] - win[0] + 1,
+            dims[1] - win[1] + 1,
+            dims[2] - win[2] + 1,
+        ];
+        let total: usize = dims.iter().product();
+        let mut src: Vec<f64> = (0..total)
+            .map(|i| match i {
+                17 => -0.0,
+                _ => ((i % 257) as f64) * 0.03125 - 4.0,
+            })
+            .collect();
+        src[total / 2] = f64::NAN;
+
+        let reference = super::reduce_window_rank3_f64_sum_xlane(&src, dims, win, out_dims);
+        let specialized = super::reduce_window_rank3_f64_sum_5x5x5_xlane(&src, dims, out_dims);
+        let canon = |v: f64| {
+            if v.is_nan() {
+                f64::NAN.to_bits()
+            } else {
+                v.to_bits()
+            }
+        };
+        assert_eq!(specialized.len(), reference.len());
+        for (idx, (&got, &want)) in specialized.iter().zip(&reference).enumerate() {
+            assert_eq!(
+                canon(got),
+                canon(want),
+                "win5 specialized rank-3 sumpool diverged at {idx}: {got:?} vs {want:?}"
             );
         }
     }

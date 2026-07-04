@@ -5828,6 +5828,19 @@ fn bench_sumpool_96x96x96_win5_f64_vec(c: &mut Criterion) {
     });
 }
 
+fn bench_sumpool_96x96x96_win5_f64_vec_generic_xlane(c: &mut Criterion) {
+    let input = sumpool3d_96_f64_input();
+    let mut p = sumpool3d_params(5);
+    p.insert("__fj_rank3_win5_generic".to_owned(), "1".to_owned());
+    c.bench_function(
+        "eval/sumpool_96x96x96_win5_f64_vec_generic_xlane",
+        |bencher| {
+            bencher
+                .iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p))
+        },
+    );
+}
+
 fn bench_sumpool_96x96x96_win9_f64_vec(c: &mut Criterion) {
     let input = sumpool3d_96_f64_input();
     let p = sumpool3d_params(9);
@@ -8785,6 +8798,7 @@ criterion_group!(
     bench_sumpool_256x256_f64_vec,
     bench_sumpool_256x256_f64_literal_reference,
     bench_sumpool_96x96x96_win5_f64_vec,
+    bench_sumpool_96x96x96_win5_f64_vec_generic_xlane,
     bench_sumpool_96x96x96_win9_f64_vec,
     bench_sin_1k,
     bench_sin_64k,
