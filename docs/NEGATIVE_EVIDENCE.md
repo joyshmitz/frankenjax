@@ -29,6 +29,14 @@ for this row is ~0.230 ms (`fft_batch_128x1000_complex128`, 15.20x loss); the ra
 per-row loss by ~1.06-1.09x but the row remains a JAX loss. Closing it needs the per-row SoA+SIMD (Stockham)
 rewrite, which stays a multi-session swing.
 
+Head-to-head follow-up (RCH `ovh-a` Criterion, radix-8 wired as production default):
+`eval/fft_batch_128x1000_complex128` = **2.7896 ms** midpoint (`[2.7523 ms, 2.8297 ms]`) vs the JAX mean
+**0.230078 ms** = **~12.1x slower** (down from the ledger's 15.20x radix-4/2 baseline of 3.4978 ms). The
+criterion-level improvement (~1.25x) is larger than the same-invocation kernel A/B (1.06-1.09x) because it
+also captures dispatch, and because the 3.4978 ms baseline was a separate-invocation measurement (cross-run
+absolute ms drift 20-60% on this shared host); the trustworthy self-ratio remains the same-invocation
+1.06-1.09x. Still a JAX loss; SoA+SIMD Stockham remains the route to close it.
+
 Correctness: `mixed_radix_radix8_matches_radix4_split_and_dft` compares radix-8 against the radix-4/prime
 split AND the direct DFT oracle for n in {8,24,40,200,1000,2000}, forward and inverse, to relative float
 tolerance (radix-8 is a different butterfly grouping, so tolerance-equal not bit-identical). Smooth-composite
