@@ -2,6 +2,34 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - NO-SHIP: Cholesky trailing-update (SYRK) GEMM-route 0.93x + 4×4 register-block 0.84x — AVX2 register/BW ceiling (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `linalg.rs` (`cholesky_schur_update_lower*`). Genuinely
+  different primitive from this session's elementwise/FFT/RNG sweep: the blocked-Cholesky trailing
+  symmetric rank-`jb` update `A22 -= L21·L21ᵀ`, the measured bottleneck of `eval_cholesky`.
+- CONTEXT (the sole realistic LAPACK gap): `bench_cholesky_2048_vs_jax`, fj-lax f64 [2048,2048] vs
+  JAX/LAPACK `jnp.linalg.cholesky` = 31.85ms. On the fast worker fj≈212ms (6.68x); this session's
+  worker was contended (≈270-480ms absolute) so ONLY the same-process A/B ratios below are trustworthy.
+  The other linalg-vs-JAX benches (qr/svd/eigh/solve/det/lu/eig) fj already WINS massively — cholesky
+  is the one primitive where JAX's FMA-blocked SYRK/TRSM/GEMM `dpotrf` beats fj.
+- The trailing update currently uses a threaded 1×4 dot tile (`cholesky_schur_dot4`: 1 p-row reused
+  across 4 q-cols, `f64x8` accumulators, lower triangle only). Two radical levers, both measured via a
+  single-process variance-immune A/B (`AtomicBool` kernel toggle, min-of-3 interleaved,
+  `--test-threads=1`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`):
+
+  | Lever | Ratio (self vs 1×4 dot) | Root cause |
+  | --- | ---: | --- |
+  | Route `A22 -= L21·L21ᵀ` through the tuned `matmul_2d_into` GEMM (transpose L21 → L21ᵀ, full rem×rem product, subtract lower tri) — mirroring LU's blocked update | **0.93x** (regress) | symmetric SYRK needs only half the product, so a full GEMM does 2× the flops; + an L21 transpose + a rem×rem alloc; + skinny rank-k (k=jb≈64) leaves matmul_2d's B-panel packing overhead unamortized. The 2× waste + overhead outweigh the microkernel GFLOPS edge. |
+  | 4×4 register-blocked tile (16 `f64x8` accumulators, 4 p-rows × 4 q-cols, 4× load reuse; staircase + row-remainder fall back to the 1×4 tail) | **0.84x** (regress) | 16 `f64x8` accs = 32 ymm vs 16 physical on this AVX2 (no AVX-512) host → heavy stack spilling, the same mechanism that made GEMM MR=8 regress ([[project_f32_gemm_register_microkernel]]). Spill traffic exceeds the load-reuse saving; the update is register/bandwidth-bound, not FLOP-bound. |
+
+- CONCLUSION: the 1×4 dot tile is the local optimum for the trailing update on this AVX2 non-FMA host.
+  BOTH reverted (linalg.rs byte-identical to HEAD; conformance untouched/GREEN). The remaining 6.68x
+  gap is (a) FMA — JAX's LAPACK SYRK/TRSM/GEMM use FMA, deliberately-avoided here
+  ([[project_fma_lever_policy_blocked]]); and (b) a cache-blocked / recursive SYRK+TRSM with
+  AVX-512-width (or ≥8-wide FMA) tiles so the accumulator tile FITS registers — a multi-session kernel,
+  not a contained lever. Do NOT re-attempt the GEMM-route or ≥4×4 register-blocking of the Schur
+  update on an AVX2 host; both are measured regressions.
+
 ## 2026-07-04 - KEEP 1.17-1.29x: fused Threefry -> erfinv random_normal; fj widens JAX win 1.25x -> 1.49x (ProudSalmon)
 
 - Agent: ProudSalmon. Crate: `fj-lax`. Primitive family: `random_normal`, deliberately different from
