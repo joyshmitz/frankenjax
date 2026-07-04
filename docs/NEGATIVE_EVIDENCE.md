@@ -2,6 +2,39 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - NO-SHIP (0.20-0.27x): radix-8 SoA butterfly for batched pow-of-eight FFT — register-spill loss (BlackThrush)
+
+Executed the SIMD-FFT-primitive route: a radix-8 SoA butterfly stage for the batched pow-of-two vectorized
+path. Target = pow-of-eight-but-not-pow-four lengths (512, 32768, …), which otherwise fall to the radix-2 SoA
+path (`soa_radix2_butterfly_stages`, log2 = 9 sweeps for 512); a radix-8 stage does the transform in log8 = 3
+sweeps. Built `Radix8Plan` (base-8 digit reversal + per-stage twiddles), `soa_radix8_butterfly_stages` (the
+validated even/odd-split-of-two-radix-4-DFTs radix-8 combine, W_8^{1,2,3} as constants), `vectorized_pow8_block`,
+and wired a `transform_batches_dense` dispatch branch.
+
+**Correctness PASSED but the kernel is a hard perf LOSS.** `radix8_soa_matches_dft_oracle` verifies the radix-8
+SoA kernel against the direct DFT/IDFT oracle for n in {8,64,512,4096}, forward and inverse, across a full
+`POW2_TILE_ROWS` tile — the kernel is numerically correct. Same-invocation interleaved min-of-9 A/B on `ovh-a`,
+`bench_radix8_vs_radix2_soa_512` (8x512 tile, radix-2 SoA stages vs radix-8 SoA stages):
+
+- run 1: radix2 = **0.0210 ms**, radix8 = **0.0769 ms** = **0.27x (3.6x SLOWER)**
+- run 2: radix2 = **0.0307 ms**, radix8 = **0.1519 ms** = **0.20x (5x SLOWER)**
+
+Root cause: the radix-8 butterfly body is ~60 f64 ops / ~30 live complex temporaries per lane; when the
+compiler vectorizes the per-lane loop over the 8-lane tile it blows past the 16 YMM registers and spills, so
+the 3x stage-count reduction is swamped by per-stage register pressure. The radix-2 SoA body has a couple of
+temporaries and autovectorizes to tight f64x8. **radix-4 is the SoA radix ceiling** (radix-4 SoA is already a
+KEEP; radix-8 over-fragments it) — the same "flop reduction loses when it fragments one efficient kernel"
+lesson as the Winograd F(2,3) conv and the mixed-radix iterative-SoA no-ships.
+
+Action: the dispatch branch was REVERTED (512 keeps the radix-2 SoA path; no production behaviour change — the
+FFT dispatch is byte-identical to the prior commit). The kernel + `Radix8Plan` + both tests are retained under
+`#[cfg(test)]` as reproducible no-ship evidence (mirroring the retained mixed-radix iterative-SoA harness), so a
+future agent does not re-implement radix-8 SoA. Retry predicate: do not re-attempt a radix >= 8 SoA butterfly
+for the batched pow2 path unless a design first avoids the register spill (e.g. narrower tile + explicit
+`std::simd` with hand-managed live set) AND beats radix-2/radix-4 SoA in this same A/B. The credible route to
+close the batched smooth-composite FFT gap (fft_batch_128x1000, 12.1x) remains the per-row SoA+SIMD Stockham
+mixed-radix kernel, still a multi-session swing.
+
 ## 2026-07-04 - DIG SURVEY / NO-SHIP: next-biggest non-FFT JAX gaps (tanh/softmax/erf/scatter) — blocker surfaced (BlackThrush)
 
 Alien-graveyard dig for the next-biggest measured JAX-loss primitive after the radix-8 FFT KEEP. Surveyed the

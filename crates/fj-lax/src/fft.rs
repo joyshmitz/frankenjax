@@ -1992,6 +1992,12 @@ fn transform_batches_dense(
         if is_power_of_four(n) {
             return transform_batches_pow4_vectorized(elements, n, batch_size, inverse);
         }
+        // NOTE: a radix-8 SoA path for pow-of-eight-but-not-pow-four lengths (512, 32768) was
+        // implemented + DFT-oracle-verified and MEASURED at 0.27x (3.6x SLOWER than this radix-2
+        // SoA path) — the radix-8 butterfly body spills registers when vectorized over the tile,
+        // so it fragments the tight autovectorizable radix-2 kernel. NO-SHIP; radix-4 is the SoA
+        // radix ceiling. See docs/NEGATIVE_EVIDENCE.md and `radix8_soa_matches_dft_oracle` /
+        // `bench_radix8_vs_radix2_soa_512` (kept cfg(test) as reproducible evidence).
         return transform_batches_pow2_vectorized(elements, n, batch_size, inverse);
     }
 
@@ -2535,6 +2541,225 @@ fn transform_batches_pow4_vectorized(
         }
     });
     out
+}
+
+/// True for n = 8^k (k >= 1): power of two with a trailing-zero count divisible by 3.
+/// NO-SHIP radix-8 SoA experiment (measured 0.27x vs radix-2 SoA); kept cfg(test) as evidence.
+#[cfg(test)]
+fn is_power_of_eight(n: usize) -> bool {
+    n.is_power_of_two() && n.trailing_zeros().is_multiple_of(3)
+}
+
+/// Base-8 digit-reversal permutation for n = 8^k (the radix-8 analogue of bit-reversal).
+#[cfg(test)]
+fn digit_reverse_base8(n: usize) -> Vec<usize> {
+    let digits = (n.trailing_zeros() / 3) as usize;
+    (0..n)
+        .map(|i| {
+            let mut x = i;
+            let mut rev = 0usize;
+            for _ in 0..digits {
+                rev = (rev << 3) | (x & 7);
+                x >>= 3;
+            }
+            rev
+        })
+        .collect()
+}
+
+/// Radix-8 plan for pow-of-eight lengths: base-8 digit reversal + per-stage `W_len^j`
+/// twiddles (stage `len` = 8,64,...,n; `eighth` = len/8 twiddles each). `W_len^{2j..7j}`
+/// are derived inline in the butterfly from `W_len^j`, keeping the table radix-2-sized.
+#[cfg(test)]
+struct Radix8Plan {
+    digit_reversed: Vec<usize>,
+    twiddles: Vec<(f64, f64)>,
+    inverse: bool,
+}
+
+#[cfg(test)]
+impl Radix8Plan {
+    fn new(n: usize, inverse: bool) -> Self {
+        debug_assert!(is_power_of_eight(n));
+        let digit_reversed = digit_reverse_base8(n);
+        let mut twiddles = Vec::new();
+        let mut len = 8usize;
+        while len <= n {
+            let eighth = len / 8;
+            let angle = if inverse {
+                2.0 * PI / (len as f64)
+            } else {
+                -2.0 * PI / (len as f64)
+            };
+            let (sin_step, cos_step) = angle.sin_cos();
+            let (mut tr, mut ti) = (1.0, 0.0);
+            for _ in 0..eighth {
+                twiddles.push((tr, ti));
+                let nr = tr * cos_step - ti * sin_step;
+                let ni = tr * sin_step + ti * cos_step;
+                tr = nr;
+                ti = ni;
+            }
+            len *= 8;
+        }
+        Self {
+            digit_reversed,
+            twiddles,
+            inverse,
+        }
+    }
+}
+
+/// Radix-8 DIT butterfly stages applied vertically across `w` SoA lanes. One radix-8 stage
+/// replaces three radix-2 stages (log8 vs log2 sweeps), so pow-of-eight lengths that are NOT
+/// pow-of-four (512, 32768, …) — which otherwise fall to the radix-2 SoA path — sweep the SoA
+/// buffer a third as many times. The length-8 DFT is the same even/odd split of two radix-4
+/// DFTs proven in the recursive `mixed_radix_ping` radix-8 combine; W_8^{1,2,3} are fixed
+/// constants carrying the transform sign, so it is tolerance-equal (not bit-identical) to the
+/// radix-2 path.
+#[cfg(test)]
+fn soa_radix8_butterfly_stages(
+    plan: &Radix8Plan,
+    w: usize,
+    n: usize,
+    re: &mut [f64],
+    im: &mut [f64],
+) {
+    let inv = plan.inverse;
+    let s8 = std::f64::consts::FRAC_1_SQRT_2;
+    // W_8^{1,2,3} carrying the transform sign (forward: e^{-2πi m/8}, inverse: conjugate).
+    let (jr, ji) = if inv { (0.0, 1.0) } else { (0.0, -1.0) }; // W_8^2 = ±i
+    let (w1r, w1i) = if inv { (s8, s8) } else { (s8, -s8) }; // W_8^1
+    let (w3r, w3i) = if inv { (-s8, s8) } else { (-s8, -s8) }; // W_8^3
+    let mut tw_base = 0usize;
+    let mut len = 8usize;
+    while len <= n {
+        let eighth = len / 8;
+        let stage_tw = &plan.twiddles[tw_base..tw_base + eighth];
+        let mut start = 0usize;
+        while start < n {
+            for (j, &(t1r, t1i)) in stage_tw.iter().enumerate() {
+                // Derive W^{2j..7j} from W^j (all outside the lane loop).
+                let (t2r, t2i) = (t1r * t1r - t1i * t1i, 2.0 * t1r * t1i);
+                let (t3r, t3i) = (t2r * t1r - t2i * t1i, t2r * t1i + t2i * t1r);
+                let (t4r, t4i) = (t2r * t2r - t2i * t2i, 2.0 * t2r * t2i);
+                let (t5r, t5i) = (t4r * t1r - t4i * t1i, t4r * t1i + t4i * t1r);
+                let (t6r, t6i) = (t4r * t2r - t4i * t2i, t4r * t2i + t4i * t2r);
+                let (t7r, t7i) = (t6r * t1r - t6i * t1i, t6r * t1i + t6i * t1r);
+                let i0 = (start + j) * w;
+                let i1 = (start + j + eighth) * w;
+                let i2 = (start + j + 2 * eighth) * w;
+                let i3 = (start + j + 3 * eighth) * w;
+                let i4 = (start + j + 4 * eighth) * w;
+                let i5 = (start + j + 5 * eighth) * w;
+                let i6 = (start + j + 6 * eighth) * w;
+                let i7 = (start + j + 7 * eighth) * w;
+                for lane in 0..w {
+                    let u0 = (re[i0 + lane], im[i0 + lane]);
+                    let a1 = (re[i1 + lane], im[i1 + lane]);
+                    let a2 = (re[i2 + lane], im[i2 + lane]);
+                    let a3 = (re[i3 + lane], im[i3 + lane]);
+                    let a4 = (re[i4 + lane], im[i4 + lane]);
+                    let a5 = (re[i5 + lane], im[i5 + lane]);
+                    let a6 = (re[i6 + lane], im[i6 + lane]);
+                    let a7 = (re[i7 + lane], im[i7 + lane]);
+                    let u1 = (a1.0 * t1r - a1.1 * t1i, a1.0 * t1i + a1.1 * t1r);
+                    let u2 = (a2.0 * t2r - a2.1 * t2i, a2.0 * t2i + a2.1 * t2r);
+                    let u3 = (a3.0 * t3r - a3.1 * t3i, a3.0 * t3i + a3.1 * t3r);
+                    let u4 = (a4.0 * t4r - a4.1 * t4i, a4.0 * t4i + a4.1 * t4r);
+                    let u5 = (a5.0 * t5r - a5.1 * t5i, a5.0 * t5i + a5.1 * t5r);
+                    let u6 = (a6.0 * t6r - a6.1 * t6i, a6.0 * t6i + a6.1 * t6r);
+                    let u7 = (a7.0 * t7r - a7.1 * t7i, a7.0 * t7i + a7.1 * t7r);
+                    // Even 4pt DFT of (u0,u2,u4,u6).
+                    let e_t0 = (u0.0 + u4.0, u0.1 + u4.1);
+                    let e_t1 = (u0.0 - u4.0, u0.1 - u4.1);
+                    let e_t2 = (u2.0 + u6.0, u2.1 + u6.1);
+                    let e_t3 = (u2.0 - u6.0, u2.1 - u6.1);
+                    let e_j = (jr * e_t3.0 - ji * e_t3.1, jr * e_t3.1 + ji * e_t3.0);
+                    let e0 = (e_t0.0 + e_t2.0, e_t0.1 + e_t2.1);
+                    let e1 = (e_t1.0 + e_j.0, e_t1.1 + e_j.1);
+                    let e2 = (e_t0.0 - e_t2.0, e_t0.1 - e_t2.1);
+                    let e3 = (e_t1.0 - e_j.0, e_t1.1 - e_j.1);
+                    // Odd 4pt DFT of (u1,u3,u5,u7).
+                    let o_t0 = (u1.0 + u5.0, u1.1 + u5.1);
+                    let o_t1 = (u1.0 - u5.0, u1.1 - u5.1);
+                    let o_t2 = (u3.0 + u7.0, u3.1 + u7.1);
+                    let o_t3 = (u3.0 - u7.0, u3.1 - u7.1);
+                    let o_j = (jr * o_t3.0 - ji * o_t3.1, jr * o_t3.1 + ji * o_t3.0);
+                    let o0 = (o_t0.0 + o_t2.0, o_t0.1 + o_t2.1);
+                    let o1 = (o_t1.0 + o_j.0, o_t1.1 + o_j.1);
+                    let o2 = (o_t0.0 - o_t2.0, o_t0.1 - o_t2.1);
+                    let o3 = (o_t1.0 - o_j.0, o_t1.1 - o_j.1);
+                    // Combine with eighth-root twiddles.
+                    let c1 = (w1r * o1.0 - w1i * o1.1, w1r * o1.1 + w1i * o1.0);
+                    let c2 = (jr * o2.0 - ji * o2.1, jr * o2.1 + ji * o2.0);
+                    let c3 = (w3r * o3.0 - w3i * o3.1, w3r * o3.1 + w3i * o3.0);
+                    re[i0 + lane] = e0.0 + o0.0;
+                    im[i0 + lane] = e0.1 + o0.1;
+                    re[i1 + lane] = e1.0 + c1.0;
+                    im[i1 + lane] = e1.1 + c1.1;
+                    re[i2 + lane] = e2.0 + c2.0;
+                    im[i2 + lane] = e2.1 + c2.1;
+                    re[i3 + lane] = e3.0 + c3.0;
+                    im[i3 + lane] = e3.1 + c3.1;
+                    re[i4 + lane] = e0.0 - o0.0;
+                    im[i4 + lane] = e0.1 - o0.1;
+                    re[i5 + lane] = e1.0 - c1.0;
+                    im[i5 + lane] = e1.1 - c1.1;
+                    re[i6 + lane] = e2.0 - c2.0;
+                    im[i6 + lane] = e2.1 - c2.1;
+                    re[i7 + lane] = e3.0 - c3.0;
+                    im[i7 + lane] = e3.1 - c3.1;
+                }
+            }
+            start += len;
+        }
+        tw_base += eighth;
+        len *= 8;
+    }
+}
+
+/// Radix-8 SoA FFT over a block of `batch` length-`n` (n = 8^k) rows. Same SoA framing as
+/// `vectorized_pow4_block` (transpose in, butterflies vertical over the batch, transpose out).
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn vectorized_pow8_block(
+    plan: &Radix8Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    n: usize,
+    inverse: bool,
+    re: &mut [f64],
+    im: &mut [f64],
+    out: &mut [(f64, f64)],
+) {
+    let w = batch;
+    let digitrev = &plan.digit_reversed;
+    for b in 0..batch {
+        let row = &elements[b * n..b * n + n];
+        for (i, &src_idx) in digitrev.iter().enumerate() {
+            let (sr, si) = row[src_idx];
+            re[i * w + b] = sr;
+            im[i * w + b] = si;
+        }
+    }
+    soa_radix8_butterfly_stages(plan, w, n, re, im);
+    if inverse {
+        let inv_n = 1.0 / (n as f64);
+        for b in 0..batch {
+            let dst = &mut out[b * n..b * n + n];
+            for (k, slot) in dst.iter_mut().enumerate() {
+                *slot = (re[k * w + b] * inv_n, im[k * w + b] * inv_n);
+            }
+        }
+    } else {
+        for b in 0..batch {
+            let dst = &mut out[b * n..b * n + n];
+            for (k, slot) in dst.iter_mut().enumerate() {
+                *slot = (re[k * w + b], im[k * w + b]);
+            }
+        }
+    }
 }
 
 /// Batched power-of-two FFT/IFFT via the cache-blocked vectorized SoA kernel.
@@ -4779,6 +5004,88 @@ mod tests {
         std::hint::black_box(chk);
         eprintln!(
             "[mixed-radix radix8 vs radix4 per-row {rows}x{n}] radix4={:.4}ms radix8={:.4}ms ratio={:.2}x (min of 9 interleaved)",
+            o as f64 / 1e6,
+            nw as f64 / 1e6,
+            o as f64 / nw as f64,
+        );
+    }
+
+    /// Correctness: the radix-8 SoA batch kernel matches the direct DFT/IDFT oracle for
+    /// pow-of-eight lengths, forward and inverse, across a full `POW2_TILE_ROWS` tile.
+    #[test]
+    fn radix8_soa_matches_dft_oracle() {
+        for &n in &[8usize, 64, 512, 4096] {
+            let w = POW2_TILE_ROWS;
+            for &inverse in &[false, true] {
+                let plan = Radix8Plan::new(n, inverse);
+                let elements: Vec<(f64, f64)> = (0..w * n)
+                    .map(|i| {
+                        (
+                            (i as f64 * 0.017).sin() - 0.2,
+                            (i as f64 * 0.029).cos() * 0.6,
+                        )
+                    })
+                    .collect();
+                let mut re = vec![0.0f64; w * n];
+                let mut im = vec![0.0f64; w * n];
+                let mut out = vec![(0.0f64, 0.0f64); w * n];
+                vectorized_pow8_block(&plan, &elements, w, n, inverse, &mut re, &mut im, &mut out);
+                for b in 0..w {
+                    let row = &elements[b * n..b * n + n];
+                    let want = if inverse { idft_1d(row) } else { dft_1d(row) };
+                    for k in 0..n {
+                        let (a, c) = (want[k], out[b * n + k]);
+                        let tol = 1e-9 * a.0.abs().max(a.1.abs()).max(1.0);
+                        assert!(
+                            (a.0 - c.0).abs() <= tol && (a.1 - c.1).abs() <= tol,
+                            "radix8 SoA != DFT oracle (n={n} inv={inverse} b={b} k={k}): {a:?} vs {c:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A/B HARNESS for the radix-8 SoA lever on a pow-of-eight-but-not-pow-four length (512),
+    /// which otherwise falls to the radix-2 SoA path. OLD = radix-2 SoA butterfly stages (9
+    /// sweeps); NEW = radix-8 SoA butterfly stages (3 sweeps). Same SoA transpose framing, so
+    /// the stage schedule is what differs. Interleaved min-of-9 — the only trustworthy FFT A/B.
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_radix8_vs_radix2_soa_512() {
+        let n = 512usize;
+        let w = POW2_TILE_ROWS;
+        let p2 = Radix2Plan::new(n, false);
+        let p8 = Radix8Plan::new(n, false);
+        let base: Vec<f64> = (0..w * n).map(|i| (i as f64 * 0.013).sin()).collect();
+        let run_old = || -> (u64, u64) {
+            let mut re: Vec<f64> = base.clone();
+            let mut im = vec![0.0f64; w * n];
+            let t0 = std::time::Instant::now();
+            soa_radix2_butterfly_stages(&p2, w, n, &mut re, &mut im);
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, re[0].to_bits() ^ re[w * n / 2].to_bits())
+        };
+        let run_new = || -> (u64, u64) {
+            let mut re: Vec<f64> = base.clone();
+            let mut im = vec![0.0f64; w * n];
+            let t0 = std::time::Instant::now();
+            soa_radix8_butterfly_stages(&p8, w, n, &mut re, &mut im);
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, re[0].to_bits() ^ re[w * n / 2].to_bits())
+        };
+        let (mut o, mut nw) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (a, ca) = run_old();
+            let (b, cb) = run_new();
+            chk ^= ca ^ cb;
+            o = o.min(a);
+            nw = nw.min(b);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[radix8 vs radix2 SoA butterflies {w}x{n}] radix2={:.4}ms radix8={:.4}ms ratio={:.2}x (min of 9 interleaved)",
             o as f64 / 1e6,
             nw as f64 / 1e6,
             o as f64 / nw as f64,
