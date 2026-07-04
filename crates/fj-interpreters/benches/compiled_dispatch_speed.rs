@@ -1058,6 +1058,96 @@ fn build_var_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     )
 }
 
+fn build_std_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+    // Variance graph but the final Div lands in `var`, then a trailing Sqrt yields the output.
+    let x = VarId(1);
+    let s1 = VarId(2);
+    let mean = VarId(3);
+    let mean_b = VarId(4);
+    let centered = VarId(5);
+    let sq = VarId(6);
+    let s2 = VarId(7);
+    let var = VarId(8);
+    let out = VarId(9);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let n = Literal::from_f64(cols as f64);
+    Jaxpr::new(
+        vec![x],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(x)],
+                outputs: smallvec::smallvec![s1],
+                params: reduce_axis1.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(s1), Atom::Lit(n)],
+                outputs: smallvec::smallvec![mean],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::BroadcastInDim,
+                inputs: smallvec::smallvec![Atom::Var(mean)],
+                outputs: smallvec::smallvec![mean_b],
+                params: bcast,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Var(mean_b)],
+                outputs: smallvec::smallvec![centered],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(centered), Atom::Var(centered)],
+                outputs: smallvec::smallvec![sq],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(sq)],
+                outputs: smallvec::smallvec![s2],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(s2), Atom::Lit(n)],
+                outputs: smallvec::smallvec![var],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sqrt,
+                inputs: smallvec::smallvec![Atom::Var(var)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_logsumexp_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let x = VarId(1);
     let max = VarId(2);
@@ -1759,6 +1849,12 @@ fn eval_var_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
     eval_primitive(Primitive::Div, &[s2, n], &empty).expect("var")
 }
 
+fn eval_std_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
+    let var = eval_var_2d_decomposed(input, rows, cols);
+    let empty = BTreeMap::new();
+    eval_primitive(Primitive::Sqrt, std::slice::from_ref(&var), &empty).expect("std")
+}
+
 fn eval_logsumexp_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let bcast = BTreeMap::from([
@@ -2394,6 +2490,23 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 eval_jaxpr(black_box(&var_jaxpr), std::slice::from_ref(&softmax_input)).unwrap(),
+            )
+        })
+    });
+    let std_jaxpr = build_std_2d_jaxpr(rows, cols);
+    group.bench_function("std_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_std_2d_decomposed(
+                black_box(&softmax_input),
+                rows,
+                cols,
+            ))
+        })
+    });
+    group.bench_function("std_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(black_box(&std_jaxpr), std::slice::from_ref(&softmax_input)).unwrap(),
             )
         })
     });

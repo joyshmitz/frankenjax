@@ -464,6 +464,58 @@ pub fn variance_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Population standard deviation of a single row, `sqrt(mean((x - mean(x))²))`, bit-identical to the
+/// decomposed variance graph followed by `Sqrt`: reuses [`variance_row`] then applies `f64::sqrt`,
+/// which is IEEE-754 correctly-rounded and therefore bit-for-bit equal to the `Sqrt` primitive.
+/// Callers guarantee a non-empty row.
+fn std_row(row: &[f64]) -> f64 {
+    variance_row(row).sqrt()
+}
+
+/// Population standard deviation (`ddof=0`) along the last axis of a 2D array, one scalar per row
+/// (`jax.numpy.std(x, axis=-1)`). ROW-PARALLEL and BIT-IDENTICAL to the decomposed variance graph
+/// (`ReduceSum → Div(mean) → BroadcastInDim → Sub → Mul(square) → ReduceSum → Div(var)`) followed by
+/// a `Sqrt`: same index-order reductions + `sum/n` mean grouping via [`variance_row`], then
+/// `f64::sqrt` (correctly-rounded = the `Sqrt` primitive). Rows are independent so only the outer
+/// loop is threaded, above the `softmax_2d_thread_count` work gate. Used by the interpreter standard
+/// deviation superinstruction.
+#[must_use]
+pub fn std_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _len = checked_2d_row_major_len("2D std", x, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = std_row(&x[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let x_block = &x[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = std_row(&x_block[start..start + cols]);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
 /// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
 /// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so

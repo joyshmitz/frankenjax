@@ -2,6 +2,45 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 13.79x vs ORIG: row-wise population standard deviation recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::std_2d`). Extends the
+  transcendental-FREE statistical-moment lane (I opened it with population variance, 13.38x): row-wise
+  standard deviation `std(x) = sqrt(mean((x - mean(x))²))` along the last axis (`jax.numpy.std(x,
+  axis=-1)`, `ddof=0`). Structurally it is the exact variance graph plus ONE trailing `Sqrt` — an
+  8-equation graph `ReduceSum(axis=1) → Div(mean) → BroadcastInDim → Sub → Mul(square) →
+  ReduceSum(axis=1) → Div(var) → Sqrt`, f64 [rows,cols] → [rows] (rank-reducing). NO transcendentals
+  (a pure moment reduction + a correctly-rounded sqrt), so per the thesis it lands the SAME large
+  multiple as variance, well clear of the transcendental-capped exp/log reductions. The general fuser
+  cannot fuse it (the two reductions break the elementwise fuser AND `Sqrt` ∉ `cheap_op`), so the
+  decomposed path materializes the full [rows,cols] centered+squared intermediates plus per-reduction
+  Vecs. Worktree audit: HEAD==origin/main (my entropy tip 4540ab1f), no unlanded win to land.
+- LEVER: a top-level 1-input superinstruction for the exact 8-eq finite dense f64 std graph, computed
+  via the row-parallel `std_2d` (= `variance_2d` then `f64::sqrt`). BIT-IDENTICAL: `std_row` reuses
+  `variance_row`'s index-order sum for the mean and index-order sum of squared centered deviations
+  (both `/n`), then applies `f64::sqrt`, which is IEEE-754 correctly-rounded and therefore bit-for-bit
+  equal to the `Sqrt` primitive the decomposed graph dispatches. Reuses the variance recognizer's
+  exact shape/divisor guards (both `Div` divisors must equal `cols` as f64, broadcast must restore
+  `rows,cols`); finite dense rank-2 f64 only, else falls through (matching the graph's NaN/Inf
+  propagation via the generic path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed std_2d
+  -m 3 -s 20`, 4096x1024, x=softmax_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/std_2d/orig_decomposed_4096x1024` | 62.527 ms |
+  | `compiled_dispatch/std_2d/fast_eval_jaxpr_4096x1024` | 4.5355 ms |
+
+  Ratio vs ORIG: **0.0725x time / 13.79x faster** (worst-case CI 12.64x, best 15.00x; robustly ≥2x).
+  Matches variance's 13.38x (the trailing per-row scalar `sqrt` over [rows] is negligible against the
+  two [rows,cols] reductions the decomposed path re-materializes).
+- VALIDATION: `eval_top_level_std_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path); fj-lax `nn::`
+  61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 5.98x vs ORIG: row-wise Shannon entropy recognized as a fused (row-parallel) 1-input interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::entropy_2d`). Deepens the
