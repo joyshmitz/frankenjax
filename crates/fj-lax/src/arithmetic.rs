@@ -6368,12 +6368,104 @@ fn log_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     r
 }
 
+/// Dense SoA f64x8 `complex_log` over `src` into `out` (equal length). The scalar
+/// `complex_log` costs a libm `ln` + a libm `atan2` per element; XLA runs both as SIMD
+/// polynomials across lanes. This composes the SAME SIMD blocks the REAL transcendentals
+/// already use — `log_f64x8` for `ln|z| = 0.5·ln(re²+im²)` and `atan2_f64x8` for the angle —
+/// so the complex path finally vectorizes. Tolerance-equal to the scalar map: `Log` has no
+/// bit-exact complex self-golden and complex parity is tolerance (both blocks ≤1-2 ulp).
+/// Lanes whose `re²+im²` is NOT a normal f64 (|z|≳1.3e154 or ≲1.5e-154, where the squared
+/// sum overflows/underflows) are recomputed with the EXACT scalar reference
+/// `re.hypot(im).ln()` — bit-identical to `complex_log`'s overflow-safe branch there.
+fn complex_log_simd_soa(src: &[(f64, f64)], out: &mut [(f64, f64)]) {
+    use std::simd::Simd;
+    type F = Simd<f64, 8>;
+    let n = src.len();
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let mut re = [0.0f64; 8];
+        let mut im = [0.0f64; 8];
+        for k in 0..8 {
+            let (r, m) = src[i + k];
+            re[k] = r;
+            im[k] = m;
+        }
+        let rev = F::from_array(re);
+        let imv = F::from_array(im);
+        let sq = rev * rev + imv * imv;
+        let ln_mag = F::splat(0.5) * log_f64x8(sq);
+        let ang = atan2_f64x8(imv, rev);
+        let sqa = sq.to_array();
+        let mut lm = ln_mag.to_array();
+        let an = ang.to_array();
+        for k in 0..8 {
+            if !sqa[k].is_normal() {
+                // Overflow/underflow-safe branch, matching scalar `complex_log`.
+                lm[k] = re[k].hypot(im[k]).ln();
+            }
+            out[i + k] = (lm[k], an[k]);
+        }
+        i += 8;
+    }
+    // Scalar tail (< 8 lanes): the exact scalar reference.
+    while i < n {
+        out[i] = complex_log(src[i]);
+        i += 1;
+    }
+}
+
+/// Threaded dense-complex `complex_log`: scoped threads over 8-aligned chunks, each running
+/// [`complex_log_simd_soa`]. Lane-independent, so the output is identical to the single-thread
+/// SIMD map regardless of chunking (each chunk is a multiple of 8, so only the final chunk has
+/// a scalar tail). Threads only above [`work_scaled_threads`]'s internal work floor.
+fn complex_log_dense_simd(
+    dtype: DType,
+    shape: &Shape,
+    dense: &[(f64, f64)],
+) -> Result<Value, EvalError> {
+    let n = dense.len();
+    let mut out = vec![(0.0f64, 0.0f64); n];
+    let threads = work_scaled_threads(n);
+    if threads <= 1 {
+        complex_log_simd_soa(dense, &mut out);
+    } else {
+        let chunk = n.div_ceil(threads).next_multiple_of(8);
+        std::thread::scope(|scope| {
+            let mut o_rest = out.as_mut_slice();
+            let mut x0 = 0usize;
+            while x0 < n {
+                let cnt = chunk.min(n - x0);
+                let (oblk, otail) = o_rest.split_at_mut(cnt);
+                o_rest = otail;
+                let sblk = &dense[x0..x0 + cnt];
+                x0 += cnt;
+                scope.spawn(move || complex_log_simd_soa(sblk, oblk));
+            }
+        });
+    }
+    Ok(Value::Tensor(TensorValue::new_complex_values(
+        dtype,
+        shape.clone(),
+        out,
+    )?))
+}
+
 pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX log_p = standard_unop(_float | _complex): integer operands are rejected.
     if let Some(input) = inputs.first() {
         ensure_jax_float_unary_operand(primitive, input)?;
     }
     if inputs.first().is_some_and(value_contains_complex) {
+        // Dense SoA f64x8 fast path for the hot Complex64/128 case: composes the SIMD
+        // log_f64x8 + atan2_f64x8 blocks instead of scalar libm ln+atan2 per element.
+        // FJ_CLOG_SCALAR forces the pre-SIMD scalar map (same-binary A/B hook).
+        if std::env::var_os("FJ_CLOG_SCALAR").is_none()
+            && let [Value::Tensor(tensor)] = inputs
+            && matches!(tensor.dtype, DType::Complex64 | DType::Complex128)
+            && let Some(dense) = tensor.elements.as_complex_slice()
+        {
+            return complex_log_dense_simd(tensor.dtype, &tensor.shape, dense);
+        }
         return eval_unary_complex_map(primitive, inputs, |a, b| complex_log((a, b)));
     }
     // FJ_LOG_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
@@ -19168,6 +19260,94 @@ mod tests {
         t("clog (JAX 22.5)", Primitive::Log);
         t("csin (JAX 37.3)", Primitive::Sin);
         t("ctanh (JAX 39.4)", Primitive::Tanh);
+    }
+
+    #[test]
+    fn complex_log_simd_matches_scalar() {
+        // The SoA f64x8 complex_log (log_f64x8 + atan2_f64x8) must equal the scalar
+        // complex_log to tolerance over a grid that covers: the branch cut (re<0, im=±0),
+        // ±0/±im, tiny/huge |z| (the NON-NORMAL re²+im² fixup that reverts to hypot), and
+        // interior values. Both magnitude (~1 ulp via the Cephes log block) and angle
+        // (atan2 block) are checked; non-normal-sq lanes must be near-bit-exact (hypot path).
+        let mags = [0.0, 1e-160_f64, 3e-155, 1e-3, 1.0, 7.5, 1e3, 2e154, 1e160];
+        let mut src: Vec<(f64, f64)> = Vec::new();
+        for &a in &mags {
+            for &b in &mags {
+                for (sr, si) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+                    src.push((a * sr, b * si));
+                }
+            }
+        }
+        // Pad past a multiple of 8 so both the SIMD block and the scalar tail run.
+        src.push((0.0, 0.0));
+        src.push((-0.0, 0.0));
+        src.push((3.25, -0.0));
+        let mut out = vec![(0.0f64, 0.0f64); src.len()];
+        complex_log_simd_soa(&src, &mut out);
+        for (i, &z) in src.iter().enumerate() {
+            let (er, ei) = complex_log(z);
+            let (gr, gi) = out[i];
+            let tol_r = 1e-11 * er.abs().max(1.0);
+            let tol_i = 1e-12 * ei.abs().max(1.0);
+            // `gr == er` covers exact matches incl. ±inf (log(0)=-inf); NaN==NaN separately.
+            assert!(
+                gr == er || (gr - er).abs() <= tol_r || (gr.is_nan() && er.is_nan()),
+                "clog re z={z:?}: simd={gr} scalar={er}"
+            );
+            assert!(
+                gi == ei || (gi - ei).abs() <= tol_i || (gi.is_nan() && ei.is_nan()),
+                "clog im z={z:?}: simd={gi} scalar={ei}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_complex_log_simd_vs_scalar() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let src: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i % 401) as f64 * 0.01 - 2.0, (i % 601) as f64 * 0.01 - 3.0))
+            .collect();
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
+        let tensor = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex64, shape.clone(), src.clone()).unwrap(),
+        );
+        // OLD = the SHIPPED threaded per-element scalar `complex_log` map (eval_unary_complex_map
+        // already threads all cores); NEW = the SoA f64x8 kernel, also threaded. Same threading,
+        // so the ratio isolates the SIMD kernel win (not threading).
+        let scalar = || {
+            let v =
+                eval_unary_complex_map(Primitive::Log, std::slice::from_ref(&tensor), |a, b| {
+                    complex_log((a, b))
+                })
+                .unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_complex_slice().unwrap()[123]);
+        };
+        let simd = || {
+            let v = complex_log_dense_simd(DType::Complex64, &shape, &src).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_complex_slice().unwrap()[123]);
+        };
+        scalar();
+        simd();
+        let mut bs = f64::MAX;
+        let mut bd = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            scalar();
+            bs = bs.min(s.elapsed().as_secs_f64());
+            let s = Instant::now();
+            simd();
+            bd = bd.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "clog 16M: scalar-threaded={:.3}ms simd-threaded={:.3}ms ratio={:.2}x | JAX=22.5ms",
+            bs * 1e3,
+            bd * 1e3,
+            bs / bd
+        );
     }
 
     #[test]

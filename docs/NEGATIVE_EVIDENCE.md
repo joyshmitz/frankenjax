@@ -2,6 +2,39 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 1.58x: complex_log dense SoA f64x8 SIMD (composes log_f64x8 + atan2_f64x8) — clog 6.88x→4.7x vs JAX (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_log` complex branch).
+  Remote via rch (`CARGO_TARGET_DIR=.../blackthrush`), `--test-threads=1` isolated.
+- GAP (from this session's measured sweep, the biggest elementwise JAX loss): complex
+  transcendentals ran SCALAR libm per element even though `eval_unary_complex_map` already
+  threads all cores — `complex_log` = `sq.ln()` + `im.atan2(re)`, two libm calls/element, vs
+  XLA's SIMD-poly. clog was **6.88x** slower than JAX (154.8ms vs 22.5ms, 16M Complex64).
+- LEVER: a dedicated dense SoA f64x8 `complex_log` kernel (`complex_log_simd_soa` +
+  threaded `complex_log_dense_simd`) that COMPOSES the SIMD blocks the REAL transcendentals
+  already use — `log_f64x8` for `ln|z| = 0.5·ln(re²+im²)` and `atan2_f64x8` for the angle —
+  wired into `eval_log`'s complex branch for dense Complex64/128. Threaded over 8-aligned
+  chunks. Non-normal `re²+im²` lanes (|z|≳1.3e154 / ≲1.5e-154) revert to the EXACT scalar
+  `re.hypot(im).ln()`, matching `complex_log`'s overflow-safe branch. `FJ_CLOG_SCALAR` env
+  forces the old scalar map (same-binary A/B hook).
+- TOLERANCE (not bit-identical): `log_f64x8`/`atan2_f64x8` are ≤1-2 ulp; complex Log parity is
+  tolerance and has NO bit-exact self-golden (per the `log_f64x8` doc + `eval_log` comments).
+  Verified by `complex_log_simd_matches_scalar`: SIMD vs scalar `complex_log` over a grid
+  covering the branch cut (re<0, im=±0), ±0, tiny/huge |z| (the non-normal-sq hypot fixup),
+  and interior values — |Δre| ≤ 1e-11·max(1,|·|), |Δim| ≤ 1e-12·max(1,|·|), exact on ±inf.
+- MEASURED (rch, same-invocation min-of-6 A/B, `--test-threads=1`, 16M Complex64,
+  `bench_complex_log_simd_vs_scalar` — OLD = shipped threaded scalar map via
+  `eval_unary_complex_map`, NEW = threaded SoA SIMD, SAME threading so the ratio isolates the
+  SIMD kernel): **scalar-threaded 167.724ms → simd-threaded 106.103ms = 1.58x.** clog vs JAX
+  narrows 6.88x → **4.7x** (106/22.5). EV: KEEP (tolerance-correct, never a regression).
+- RESIDUAL / follow-up (why 1.58x not the ~2.8x est): the AoS `(f64,f64)` operand is
+  deinterleaved with 8 scalar per-lane loads into re[8]/im[8] before each f64x8 op — a SIMD
+  deinterleave (load two f64x8, deswizzle) would cut that gather overhead; and at 16M the
+  256MB read+write is partly BW-bound. cexp/csin/ctanh (3.3-3.9x) get the sibling treatment
+  (exp_* + sincos_reduce_f64x8 composition) — next swing. See [[project_fft_jax_loss_frontier]]
+  (2026-07-04 scope note: complex transcendentals are now the biggest elementwise gap, not FFT).
+
+
 ## 2026-07-04 - MEASURED gap sweep: FFT single-row is AT PARITY (stale "7-43x" corrected); complex transcendentals are the biggest elementwise gap (clog 6.88x), SIMD lever sized (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Remote via rch (`CARGO_TARGET_DIR=.../blackthrush`),
