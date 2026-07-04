@@ -1182,6 +1182,12 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) =
+        try_eval_top_level_root_mean_squared_error_2d_f64(jaxpr, const_values, args)
+    {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_pearson_correlation_2d_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -3767,6 +3773,105 @@ fn try_eval_top_level_mean_squared_error_2d_f64(
     }
 
     let output = fj_lax::nn::mean_squared_error_2d(a_v, b_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise root mean squared error `sqrt(mean((a-b)²))`
+/// (`sklearn.metrics.root_mean_squared_error` — the RMSE regression metric): the 5-equation, TWO-input
+/// graph `Sub(a,b) → Mul(square) → ReduceSum(axis=1) → Div(·, n) → Sqrt`, two f64 [rows,cols] inputs →
+/// one [rows] output (rank-reducing). Computed via the row-parallel
+/// [`fj_lax::nn::root_mean_squared_error_2d`], which fuses the squared-error accumulation into one
+/// index-order pass (bit-identical to `mean_squared_error_2d`) and applies `f64::sqrt` (= the `Sqrt`
+/// primitive) to the per-row mean. DISTINCT from `mean_squared_error_2d` (identical 4-eq prefix but NO
+/// trailing Sqrt) and from `euclidean_distance_2d` (`sqrt(Σ(a-b)²)` — Sqrt directly on the ReduceSum,
+/// NO `Div(·, n)`). Falls through unless both inputs are dense finite rank-2 f64 of equal shape.
+fn try_eval_top_level_root_mean_squared_error_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 5
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let a = jaxpr.invars[0];
+    let b = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [sub_eq, sq_eq, sum_eq, div_eq, sqrt_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    let diff = single_output_for_primitive(sub_eq, Primitive::Sub)?;
+    if sub_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(b)] {
+        return None;
+    }
+    let sq = single_output_for_primitive(sq_eq, Primitive::Mul)?;
+    if sq_eq.inputs.as_slice() != [Atom::Var(diff), Atom::Var(diff)] {
+        return None;
+    }
+    let sum = single_output_for_param_primitive(sum_eq, Primitive::ReduceSum)?;
+    if sum_eq.inputs.as_slice() != [Atom::Var(sq)] || !axis1_reduce_params(&sum_eq.params) {
+        return None;
+    }
+    let ms = single_output_for_primitive(div_eq, Primitive::Div)?;
+    let [Atom::Var(num), denom] = div_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *num != sum {
+        return None;
+    }
+    let root = single_output_for_primitive(sqrt_eq, Primitive::Sqrt)?;
+    if root != out || sqrt_eq.inputs.as_slice() != [Atom::Var(ms)] {
+        return None;
+    }
+
+    let Value::Tensor(a_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(b_t) = &args[1] else {
+        return None;
+    };
+    if a_t.dtype != DType::F64
+        || b_t.dtype != DType::F64
+        || a_t.shape.dims.len() != 2
+        || b_t.shape.dims != a_t.shape.dims
+    {
+        return None;
+    }
+    let rows = a_t.shape.dims[0] as usize;
+    let cols = a_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    if f64_literal(denom)?.to_bits() != (cols as f64).to_bits() {
+        return None;
+    }
+
+    let a_v = a_t.elements.as_f64_slice()?;
+    let b_v = b_t.elements.as_f64_slice()?;
+    if !a_v.iter().all(|value| value.is_finite()) || !b_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::root_mean_squared_error_2d(a_v, b_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -22771,6 +22876,107 @@ mod tests {
             eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()]).expect("nonfinite mse falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite mse");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_root_mean_squared_error_2d_jaxpr(cols: usize) -> Jaxpr {
+        let a = VarId(1);
+        let b = VarId(2);
+        let diff = VarId(3);
+        let sq = VarId(4);
+        let s = VarId(5);
+        let ms = VarId(6);
+        let out = VarId(7);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+                    outputs: smallvec![diff],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(diff), Atom::Var(diff)],
+                    outputs: smallvec![sq],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(sq)],
+                    outputs: smallvec![s],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(s), Atom::Lit(Literal::from_f64(cols as f64))],
+                    outputs: smallvec![ms],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sqrt,
+                    inputs: smallvec![Atom::Var(ms)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_root_mean_squared_error_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let a_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.43).sin() * 3.0 - 0.75)
+            .collect();
+        let b_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.13).cos() * 2.5 + 0.4)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let a = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_data).expect("a input"),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, b_data).expect("b input"),
+        );
+        let jaxpr = make_root_mean_squared_error_2d_jaxpr(cols);
+
+        let fast = eval_jaxpr(&jaxpr, &[a.clone(), b.clone()]).expect("fast rmse");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[a, b]).expect("generic rmse");
+        assert_eq!(fast, generic);
+
+        let mut a_nonfinite: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        a_nonfinite[cols + 1] = f64::NAN;
+        let a_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_nonfinite)
+                .expect("nonfinite a"),
+        );
+        let b_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols).map(|idx| idx as f64 * 0.02).collect(),
+            )
+            .expect("finite b"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()])
+            .expect("nonfinite rmse falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite rmse");
         assert_eq!(through_eval, through_generic);
     }
 

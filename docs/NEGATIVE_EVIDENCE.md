@@ -2,6 +2,41 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 4.19x vs ORIG: row-wise root mean squared error (RMSE) recognized as a fused 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::root_mean_squared_error_2d`).
+  Root mean squared error `sqrt(mean((a − b)²))` along the last axis (`sklearn.metrics.root_mean_squared_error`
+  — the single most-used regression metric). A 5-equation, TWO-input graph
+  `Sub(a,b) → Mul(square) → ReduceSum(axis=1) → Div(·, n) → Sqrt`, two f64 [rows,cols] inputs → one [rows]
+  output (rank-reducing). Worktree audit: HEAD==origin/main (my minmax tip `e2416713`), no unlanded win to
+  land → DIG turn. DISTINCT from `mean_squared_error_2d` (5.91x — identical 4-eq prefix but NO trailing Sqrt)
+  and from `euclidean_distance_2d` (3.78x/6.12x — `sqrt(Σ(a-b)²)`, Sqrt directly on the ReduceSum with NO
+  `Div(·, n)`). Transcendental-free (the only non-arithmetic op is the trailing `Sqrt`, applied to the [rows]
+  reduced vector, so cheap).
+- LEVER: a top-level 2-input superinstruction for the exact 5-eq finite dense f64 RMSE graph, computed via the
+  row-parallel `root_mean_squared_error_2d`. BIT-IDENTICAL: `rmse_row` = `mean_squared_error_row(a,b).sqrt()`
+  — the squared-error accumulator is an index-order sum of `(a[i]-b[i])²` matching `ReduceSum` applied to the
+  materialized `Mul(Sub,Sub)` tensor (exactly the shipped MSE fusion), the `/ n` matches `Div`, and the
+  trailing `f64::sqrt` (on the per-row mean) IS the `Sqrt` primitive (IEEE correctly-rounded). Both inputs
+  must be dense finite rank-2 f64 of EQUAL shape and the `Div` divisor must equal `cols` (as f64), else falls
+  through to the generic path.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed root_mean_squared_error_2d
+  -m 3 -s 20`, 4096x1024, a=softmax_input b=layer_norm_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/root_mean_squared_error_2d/orig_decomposed_4096x1024` | 32.343 ms |
+  | `compiled_dispatch/root_mean_squared_error_2d/fast_eval_jaxpr_4096x1024` | 7.712 ms |
+
+  Ratio vs ORIG: **0.238x time / 4.19x faster** (fast-path CI wide from rch worker contention 6.70–9.28 ms;
+  worst-case CI 3.46x, best 4.87x; robustly ≥2x). Consistent with MSE's 5.91x (same 2-producer decomposed
+  baseline — diff + squared — plus a negligible trailing Sqrt on [rows]); the contention widened the fast CI.
+- VALIDATION: `eval_top_level_root_mean_squared_error_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on mixed-sign random f64; nonfinite input falls through to the generic path);
+  fj-lax `nn::` GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no cbrt/arena code.
+
 ## 2026-07-04 - WIN 7.33x vs ORIG: row-wise min-max (feature-scaling) normalize recognized as a fused (row-parallel) RANK-PRESERVING interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::minmax_normalize_2d`). This is the

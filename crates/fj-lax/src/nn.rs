@@ -1281,6 +1281,57 @@ pub fn mean_squared_error_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> 
     result
 }
 
+fn rmse_row(a: &[f64], b: &[f64]) -> f64 {
+    mean_squared_error_row(a, b).sqrt()
+}
+
+/// Root mean squared error along the last axis of two 2D arrays, `sqrt(mean((a-b)²))`, one scalar per
+/// row (`sklearn.metrics.root_mean_squared_error` — the RMSE regression metric). ROW-PARALLEL and
+/// BIT-IDENTICAL to the decomposed `Sub(a,b) → Mul(square) → ReduceSum(axis=1) → Div(·, n) → Sqrt`
+/// graph via [`rmse_row`]: the squared-error accumulator is an index-order sum matching `ReduceSum`
+/// (exactly as `mean_squared_error_row`), the `/ n` matches `Div`, and the trailing `f64::sqrt` (on the
+/// [rows] reduced value) IS the `Sqrt` primitive (IEEE correctly-rounded). Used by the interpreter RMSE
+/// superinstruction. NOTE: distinct from `mean_squared_error_2d` (no trailing Sqrt) and from
+/// `euclidean_distance_2d` (`sqrt(Σ(a-b)²)` — no `/ n` before the Sqrt).
+#[must_use]
+pub fn root_mean_squared_error_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D root_mean_squared_error a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D root_mean_squared_error b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = rmse_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = rmse_row(&a_block[start..start + cols], &b_block[start..start + cols]);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Pearson correlation of a single pair of rows,
 /// `Σ((a-ma)(b-mb)) / (√Σ(a-ma)² · √Σ(b-mb)²)` where `ma=mean(a)`, `mb=mean(b)` — i.e. the cosine
 /// similarity of the CENTERED vectors. Bit-identical to the decomposed

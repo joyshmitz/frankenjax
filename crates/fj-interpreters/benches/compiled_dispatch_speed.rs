@@ -691,6 +691,67 @@ fn build_mean_squared_error_2d_jaxpr(cols: usize) -> Jaxpr {
     )
 }
 
+fn build_root_mean_squared_error_2d_jaxpr(cols: usize) -> Jaxpr {
+    let a = VarId(1);
+    let b = VarId(2);
+    let diff = VarId(3);
+    let sq = VarId(4);
+    let s = VarId(5);
+    let ms = VarId(6);
+    let out = VarId(7);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    Jaxpr::new(
+        vec![a, b],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(a), Atom::Var(b)],
+                outputs: smallvec::smallvec![diff],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(diff), Atom::Var(diff)],
+                outputs: smallvec::smallvec![sq],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(sq)],
+                outputs: smallvec::smallvec![s],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![
+                    Atom::Var(s),
+                    Atom::Lit(Literal::from_f64(cols as f64))
+                ],
+                outputs: smallvec::smallvec![ms],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sqrt,
+                inputs: smallvec::smallvec![Atom::Var(ms)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_manhattan_distance_2d_jaxpr() -> Jaxpr {
     let a = VarId(1);
     let b = VarId(2);
@@ -2447,6 +2508,22 @@ fn eval_mean_squared_error_2d_decomposed(a: &Value, b: &Value, cols: usize) -> V
     eval_primitive(Primitive::Div, &[s, Value::scalar_f64(cols as f64)], &empty).expect("mse")
 }
 
+fn eval_root_mean_squared_error_2d_decomposed(a: &Value, b: &Value, cols: usize) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let empty = BTreeMap::new();
+    let diff = eval_primitive(Primitive::Sub, &[a.clone(), b.clone()], &empty).expect("a-b");
+    let sq = eval_primitive(Primitive::Mul, &[diff.clone(), diff], &empty).expect("square");
+    let s = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&sq),
+        &reduce_axis1,
+    )
+    .expect("sum sq");
+    let ms =
+        eval_primitive(Primitive::Div, &[s, Value::scalar_f64(cols as f64)], &empty).expect("mse");
+    eval_primitive(Primitive::Sqrt, std::slice::from_ref(&ms), &empty).expect("rmse")
+}
+
 fn eval_manhattan_distance_2d_decomposed(a: &Value, b: &Value) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let empty = BTreeMap::new();
@@ -3347,6 +3424,20 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     });
     group.bench_function("mean_squared_error_2d/fast_eval_jaxpr_4096x1024", |b| {
         b.iter(|| black_box(eval_jaxpr(black_box(&mse_jaxpr), black_box(&mse_args)).unwrap()))
+    });
+    let rmse_jaxpr = build_root_mean_squared_error_2d_jaxpr(cols);
+    let rmse_args = [softmax_input.clone(), layer_norm_input.clone()];
+    group.bench_function("root_mean_squared_error_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_root_mean_squared_error_2d_decomposed(
+                black_box(&rmse_args[0]),
+                black_box(&rmse_args[1]),
+                cols,
+            ))
+        })
+    });
+    group.bench_function("root_mean_squared_error_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| black_box(eval_jaxpr(black_box(&rmse_jaxpr), black_box(&rmse_args)).unwrap()))
     });
     let manhattan_jaxpr = build_manhattan_distance_2d_jaxpr();
     let manhattan_args = [softmax_input.clone(), layer_norm_input.clone()];
