@@ -17,6 +17,20 @@ sorting inside fj-lax, not against the legacy JAX/XLA-CPU parity target. Common 
 already well ahead of JAX; only unbenchmarked niche dtype tails remain low-priority cleanup, not an active
 vs-JAX perf gap. No code change.
 
+## 2026-07-04 - CLOSEOUT: rank-3 reduce_window SUM win9 is 4.67x faster than JAX; 72v5f closed (ProudSalmon)
+
+Fresh strict-remote RCH Criterion proof for a different primitive family from the prior sort_key_val closeout:
+`reduce_window(sum)` / volumetric sum-pooling, worker `hz2`.
+
+- `cargo bench -p fj-lax --bench lax_baseline -- 'eval/sumpool_96x96x96_win(5|9)_f64_vec' --sample-size 10 --warm-up-time 1 --measurement-time 2`
+- `eval/sumpool_96x96x96_win9_f64_vec`: fj-lax **2.1131ms** vs JAX **9.87ms** = **4.67x FASTER**
+- `eval/sumpool_96x96x96_win5_f64_vec`: fj-lax **2.1414ms** vs JAX **1.75ms** = **1.22x slower**
+
+The broad `frankenjax-nd-separable-sum-pool-72v5f` premise is now closed: rank-3 large-window SUM pooling is
+not a hundreds-of-ms gap and is a strong JAX win on the retained per-crate benchmark. The only surfaced
+residual is the small-window win5 case, where fixed loop/setup overhead does not amortize; filed as a narrow
+P4 follow-up instead of keeping the stale broad bead open. No code change.
+
 ## 2026-07-03 - WIRED BENCH + WIN CONFIRMED: iterative special fns are 33-67x FASTER than XLA-CPU (BlackThrush)
 
 Fresh RCH Criterion evidence for the newly surfaced iterative-special-function region. Production code was
