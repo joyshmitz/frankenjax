@@ -37,6 +37,41 @@ Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
   this ledger exits 1 on inherited broad panic/indexing/security-heuristic inventories, while its
   fmt/clippy/check/test-build/audit/deny subchecks are GREEN.
 
+## 2026-07-04 - WIN 4.22x vs ORIG: row-wise Manhattan (L1) distance recognized as a fused 2-input interpreter superinstruction (DustyDog)
+
+- Agent: DustyDog. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::manhattan_distance_2d`).
+  New primitive distinct from the already-landed cosine-similarity and Euclidean-distance lanes:
+  row-wise Manhattan/L1 distance = `sum(abs(a - b), axis=1)`, a TWO-input rank-reducing metric used
+  by nearest-neighbor, clustering, robust-loss, and sparse-feature workloads. The exact 3-equation
+  graph is `Sub(a,b) -> Abs -> ReduceSum(axis=1)`, f64 `[rows,cols] x 2 -> [rows]`. The decomposed
+  path materializes two full `[rows,cols]` intermediates (`a-b`, `abs(a-b)`) before reducing; the
+  fused path streams each row once and writes one scalar per row.
+- LEVER: a top-level finite dense f64 recognizer for that exact 3-equation graph, falling through
+  for consts/effects, shape or dtype mismatch, nonfinite values, empty axes, or non-matching operand
+  topology. The row kernel preserves graph order: index-order `diff = a[i] - b[i]`, then index-order
+  `sum += diff.abs()`, so the fused and generic paths compare bit-for-bit on the focused parity test.
+- MEASURED per-crate (`AGENT_NAME=DustyDog`, `rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`;
+  requested `cargo bench --release ...` was rejected by Cargo with `unexpected argument '--release'`,
+  so the equivalent accepted command was used:
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed manhattan_distance_2d -- --warm-up-time 1 --measurement-time 2 --sample-size 10`,
+  worker `hz2`, 4096x1024, `a=softmax_input`, `b=layer_norm_input`):
+
+  | row | mean | (CI low..high) |
+  | --- | ---: | :--- |
+  | `compiled_dispatch/manhattan_distance_2d/orig_decomposed_4096x1024` | 44.421 ms | 43.145..47.044 |
+  | `compiled_dispatch/manhattan_distance_2d/fast_eval_jaxpr_4096x1024` | 10.519 ms | 10.066..10.910 |
+
+  Ratio vs ORIG: **0.237x time / 4.22x faster** (conservative CI ratio 43.145/10.910 = 3.95x).
+- VALIDATION: `eval_top_level_manhattan_distance_2d_f64_matches_generic_and_preserves_edges` GREEN
+  via `rch exec` on `hz1` (`cargo test -p fj-interpreters ... -- --nocapture`): fast path equals
+  generic; nonfinite input falls through. `cargo bench --release` compatibility failure is command
+  spelling only; the release-profile bench above completed successfully. `cargo check -p
+  fj-interpreters --all-targets` GREEN via `rch exec` on `ovh-a`; `cargo clippy -p
+  fj-interpreters --all-targets --no-deps -- -D warnings` GREEN via `rch exec` on `hz2`.
+  `cargo test -p fj-conformance --profile release -- --nocapture` GREEN locally after the queued
+  `rch` conformance job did not receive a worker assignment for several minutes. Existing unrelated
+  `fj-lax` warnings printed during check/clippy/conformance.
+
 ## 2026-07-04 - WIN 3.78x vs ORIG: row-wise Euclidean (L2) distance recognized as a fused (row-parallel) 2-input interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::euclidean_distance_2d`).
