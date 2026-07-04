@@ -31976,6 +31976,55 @@ mod tests {
         });
     }
 
+    // Iterative special functions vs XLA-CPU. JAX 0.10.2 CPU (jaxvenv, jit'd, min-of-7) on 1M f64:
+    // betainc=2639ms, igamma(gammainc)=2192ms — XLA is very weak on the per-element continued
+    // fraction / series (no SIMD-able early-exit). fj threads these element-independent evaluations
+    // (EXPENSIVE_BINARY_PARALLEL_MIN gate), so this is a candidate fj WIN. Same-shape 1M f64 inputs.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_betainc_igamma_vs_jax() {
+        use std::time::Instant;
+        let n = 1_usize << 20; // 1M, matches the JAX comparison workload
+        let a: Vec<f64> = (0..n).map(|i| 0.5 + (i % 4517) as f64 * 0.001).collect();
+        let b: Vec<f64> = (0..n).map(|i| 0.5 + (i % 3911) as f64 * 0.0012).collect();
+        let x: Vec<f64> = (0..n).map(|i| 0.01 + (i % 97) as f64 * 0.0101).collect();
+        let ta = tensor_f64(vec![n as u32], &a);
+        let tb = tensor_f64(vec![n as u32], &b);
+        let tx = tensor_f64(vec![n as u32], &x);
+        // igamma wants a>0, x>=0
+        let ig_a: Vec<f64> = (0..n).map(|i| 0.5 + (i % 997) as f64 * 0.01).collect();
+        let ig_x: Vec<f64> = (0..n).map(|i| (i % 2003) as f64 * 0.01).collect();
+        let tiga = tensor_f64(vec![n as u32], &ig_a);
+        let tigx = tensor_f64(vec![n as u32], &ig_x);
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                best = best.min(s.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let bt = best(&|| {
+            std::hint::black_box(
+                eval_betainc(Primitive::Betainc, &[ta.clone(), tb.clone(), tx.clone()]).unwrap(),
+            );
+        });
+        let ig = best(&|| {
+            std::hint::black_box(
+                eval_igamma(Primitive::Igamma, &[tiga.clone(), tigx.clone()]).unwrap(),
+            );
+        });
+        println!(
+            "[special vs JAX 1M f64] betainc={:.1}ms (JAX 2639, {:.1}x) | igamma={:.1}ms (JAX 2192, {:.1}x)",
+            bt * 1e3,
+            2639.0 / (bt * 1e3),
+            ig * 1e3,
+            2192.0 / (ig * 1e3),
+        );
+    }
+
     #[test]
     fn bessel_i0e_i1e_simd_bit_identical_to_scalar() {
         // The dense-f64 8-wide SIMD i0e/i1e path must equal the scalar per-element
