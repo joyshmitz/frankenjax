@@ -2,6 +2,48 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - DIG SURVEY / NO-SHIP: next-biggest non-FFT JAX gaps (tanh/softmax/erf/scatter) — blocker surfaced (BlackThrush)
+
+Alien-graveyard dig for the next-biggest measured JAX-loss primitive after the radix-8 FFT KEEP. Surveyed the
+four ledger candidates with FRESH measurement (not stale ledger ratios), because primitive dispatch has
+evolved since several entries were written. Findings, most-actionable first:
+
+**tanh — real 15.1x dispatch-path gap, but FMA-policy-bound.** The ledger's 14.58x is NOT a stale artifact:
+`Primitive::Tanh` now routes threaded SIMD (`tanh_f64x8` via `eval_unary_simd_dense_f64_parallel`), yet the
+gap holds. Fresh RCH `ovh-a` Criterion, `eval/tanh_1m_f64_vec`:
+- production (threaded SIMD, `tanh_f64x8`): **4.4271 ms** (`[4.4037, 4.4606]`)
+- raw simd-poly probe: **4.0416 ms**; threaded libm reference: **13.785 ms**
+- vs JAX mean **0.293181 ms** = **15.1x slower** (production).
+`tanh_f64x8` computes `exp_cephes_block_f64(-2|x|)` then `(1-e)/(1+e)` = one exp (with an internal division)
+plus a second division. The only algorithmic lever left is a direct rational/continued-fraction `tanh(x) =
+x·P(x²)/Q(x²)` that trades the exp range-reduction + one division for a single division. On this **no-FMA
+host** both the exp poly and a rational poly are FMA-free, so the estimated win is ~1.1-1.2x internal (one
+fewer f64 division per 8-lane block) and it never crosses JAX; it also needs a clamped-range rational with a
+scalar fallback for out-of-range lanes (extra masking complexity + coefficient generation to the 1e-10
+`tanh_oracle` bar). Dropped as low-EV/high-implementation-risk relative to the clean radix-8/sumpool KEEPs.
+The dominant cause of the 15x is the deliberately-avoided global `+fma` flag (XLA's tanh is FMA + heavily
+vectorized) — a maintainer `+fma` decision would unblock the whole transcendental family at once (tanh, erf,
+softmax-exp, exp, gelu). This is the surfaced blocker, not a code lever.
+
+**softmax — NOT on the dispatch path.** `nn::softmax` / `softmax_2d` (nn.rs) appear ONLY in nn.rs and
+`benches/lax_baseline.rs`; they are not wired into eval / fj-dispatch / fj-trace / fj-ad. Real
+`jax.nn.softmax` decomposes to primitives (reduce_max, the already-SIMD-threaded `Exp` primitive, reduce_sum,
+div). The ledger's 2.43x softmax loss was measured on `nn/softmax_2d_65536x16_fused` (a 16-wide-row bench-only
+helper); a SIMD-exp attempt on that shape was already rejected (~0-gain, "do not retry stack-copy
+simd_poly_exp_into row16"). `softmax_row_into` does use scalar libm exp for ALL widths including wide (1024)
+rows, so a width-gated SIMD-exp would speed the `nn/softmax_*_fused` benches — but that is a bench-only helper,
+not a real JAX-narrowing win, so it was NOT landed (landing it would misrepresent a non-dispatch helper).
+
+**erf — same FMA-bound transcendental class** as tanh (threaded rational already); no new lever without `+fma`.
+
+**scatter_add — memory-bound, mined** (bucketed owner-computes KEEP at 2.74x; histogram-prefix and atomic
+branches already reverted per `frankenjax-mcqr`).
+
+Net: the genuinely-open big gap on the real dispatch path remains **FFT** (`fft_batch_128x1000` measured 12.1x
+this session), whose close needs the multi-session per-row SoA+SIMD Stockham rewrite. The transcendental
+family's residual is gated on a maintainer `+fma` decision. No production code change from this survey; it is a
+measured no-ship recorded to stop future agents re-chasing the stale/bench-only non-FFT rows.
+
 ## 2026-07-04 - KEEP (1.06-1.09x): radix-8 peel for smooth-composite per-row mixed-radix FFT; still a JAX loss (BlackThrush)
 
 New radix-8 butterfly in the per-row recursive mixed-radix kernel (`mixed_radix_ping`). This is the
