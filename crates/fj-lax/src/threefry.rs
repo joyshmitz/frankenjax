@@ -1217,7 +1217,26 @@ pub fn random_poisson(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
 /// draws a count-sized uniform block, and for every element still accumulating
 /// (`log_prod > -lam`) increments `k`; `log_prod += log(u)` unconditionally. Result is
 /// `k - 1`. Loops until no element is still accumulating.
+/// Threads chosen for a poisson per-element accept/step loop. The PTRS step evaluates an
+/// `lgamma` per element per iteration (heavy), so a low threshold pays; the Knuth step is
+/// cheaper but the many `ln` sweeps still dominate at scale. `FJ_POISSON_SERIAL` forces the
+/// serial reference for a same-invocation A/B.
+fn poisson_parallel_threads(count: usize) -> usize {
+    if count >= (1 << 13) && std::env::var_os("FJ_POISSON_SERIAL").is_none() {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(count)
+    } else {
+        1
+    }
+}
+
 fn poisson_knuth(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
+    poisson_knuth_with(key, count, lam, poisson_parallel_threads(count))
+}
+
+fn poisson_knuth_with(key: PRNGKey, count: usize, lam: f64, threads: usize) -> Vec<u64> {
     let mut rng = key;
     let mut k = vec![0i64; count];
     let mut log_prod = vec![0.0f64; count];
@@ -1230,11 +1249,40 @@ fn poisson_knuth(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
         let s = random_split_n(rng, 2);
         rng = s[0];
         let u = random_uniform(s[1], count, 0.0, 1.0);
-        for i in 0..count {
-            if log_prod[i] > -lam {
-                k[i] += 1;
+        // Per-element step: element i reads only u[i] + its own k[i]/log_prod[i], so the
+        // sweep is data-parallel and BIT-IDENTICAL to the serial loop for any partition.
+        if threads <= 1 {
+            for i in 0..count {
+                if log_prod[i] > -lam {
+                    k[i] += 1;
+                }
+                log_prod[i] += u[i].ln();
             }
-            log_prod[i] += u[i].ln();
+        } else {
+            let chunk = count.div_ceil(threads);
+            let u_ref = &u;
+            std::thread::scope(|scope| {
+                let mut k_rest: &mut [i64] = k.as_mut_slice();
+                let mut lp_rest: &mut [f64] = log_prod.as_mut_slice();
+                let mut start = 0usize;
+                while start < count {
+                    let len = chunk.min(count - start);
+                    let (k_blk, k_tail) = k_rest.split_at_mut(len);
+                    k_rest = k_tail;
+                    let (lp_blk, lp_tail) = lp_rest.split_at_mut(len);
+                    lp_rest = lp_tail;
+                    let s0 = start;
+                    scope.spawn(move || {
+                        for j in 0..len {
+                            if lp_blk[j] > -lam {
+                                k_blk[j] += 1;
+                            }
+                            lp_blk[j] += u_ref[s0 + j].ln();
+                        }
+                    });
+                    start += len;
+                }
+            });
         }
     }
     k.iter().map(|&ki| (ki - 1).max(0) as u64).collect()
@@ -1243,7 +1291,42 @@ fn poisson_knuth(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
 /// Vectorized Hörmann transformed-rejection (jax `_poisson_rejection`). Each iteration
 /// splits the key 3-way, draws two count-sized uniform blocks, and accepts per element
 /// via the squeeze/log tests; loops until every element is accepted.
+/// Hörmann PTRS accept/step for one element (pure in `u_blk[i]`/`v_blk[i]` + constants):
+/// returns `Some(k)` on acceptance this iteration, `None` otherwise. Factored out so the
+/// serial and threaded sweeps share identical arithmetic (the `lgamma` here is the loop's
+/// dominant cost). Preserves the original overwrite-on-every-acceptance semantics.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn poisson_ptrs_step(
+    ui: f64,
+    v: f64,
+    lam: f64,
+    log_lam: f64,
+    a: f64,
+    b: f64,
+    inv_alpha: f64,
+    v_r: f64,
+) -> Option<f64> {
+    let u = ui - 0.5;
+    let u_shifted = 0.5 - u.abs();
+    let k = ((2.0 * a / u_shifted + b) * u + lam + 0.43).floor();
+    let s_val = (v * inv_alpha / (a / (u_shifted * u_shifted) + b)).ln();
+    let t = -lam + k * log_lam - crate::arithmetic::lgamma_approx(k + 1.0);
+    let accept1 = u_shifted >= 0.07 && v <= v_r;
+    let reject = k < 0.0 || (u_shifted < 0.013 && v > u_shifted);
+    let accept2 = s_val <= t;
+    if accept1 || (!reject && accept2) {
+        Some(k)
+    } else {
+        None
+    }
+}
+
 fn poisson_rejection(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
+    poisson_rejection_with(key, count, lam, poisson_parallel_threads(count))
+}
+
+fn poisson_rejection_with(key: PRNGKey, count: usize, lam: f64, threads: usize) -> Vec<u64> {
     let log_lam = lam.ln();
     let b = 0.931 + 2.53 * lam.sqrt();
     let a = -0.059 + 0.02483 * b;
@@ -1261,20 +1344,52 @@ fn poisson_rejection(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
         rng = s[0];
         let u_blk = random_uniform(s[1], count, 0.0, 1.0);
         let v_blk = random_uniform(s[2], count, 0.0, 1.0);
-        for i in 0..count {
-            let u = u_blk[i] - 0.5;
-            let v = v_blk[i];
-            let u_shifted = 0.5 - u.abs();
-            let k = ((2.0 * a / u_shifted + b) * u + lam + 0.43).floor();
-            let s_val = (v * inv_alpha / (a / (u_shifted * u_shifted) + b)).ln();
-            let t = -lam + k * log_lam - crate::arithmetic::lgamma_approx(k + 1.0);
-            let accept1 = u_shifted >= 0.07 && v <= v_r;
-            let reject = k < 0.0 || (u_shifted < 0.013 && v > u_shifted);
-            let accept2 = s_val <= t;
-            if accept1 || (!reject && accept2) {
-                k_out[i] = k;
-                accepted[i] = true;
+        // Element i reads only u_blk[i]/v_blk[i] and writes its own k_out[i]/accepted[i];
+        // the per-element PTRS step (one lgamma each) is data-parallel and BIT-IDENTICAL to
+        // the serial loop for any partition.
+        if threads <= 1 {
+            for i in 0..count {
+                if let Some(k) =
+                    poisson_ptrs_step(u_blk[i], v_blk[i], lam, log_lam, a, b, inv_alpha, v_r)
+                {
+                    k_out[i] = k;
+                    accepted[i] = true;
+                }
             }
+        } else {
+            let chunk = count.div_ceil(threads);
+            let (u_ref, v_ref) = (&u_blk, &v_blk);
+            std::thread::scope(|scope| {
+                let mut ko_rest: &mut [f64] = k_out.as_mut_slice();
+                let mut ac_rest: &mut [bool] = accepted.as_mut_slice();
+                let mut start = 0usize;
+                while start < count {
+                    let len = chunk.min(count - start);
+                    let (ko_blk, ko_tail) = ko_rest.split_at_mut(len);
+                    ko_rest = ko_tail;
+                    let (ac_blk, ac_tail) = ac_rest.split_at_mut(len);
+                    ac_rest = ac_tail;
+                    let s0 = start;
+                    scope.spawn(move || {
+                        for j in 0..len {
+                            if let Some(k) = poisson_ptrs_step(
+                                u_ref[s0 + j],
+                                v_ref[s0 + j],
+                                lam,
+                                log_lam,
+                                a,
+                                b,
+                                inv_alpha,
+                                v_r,
+                            ) {
+                                ko_blk[j] = k;
+                                ac_blk[j] = true;
+                            }
+                        }
+                    });
+                    start += len;
+                }
+            });
         }
     }
     k_out.iter().map(|&k| k.max(0.0) as u64).collect()
@@ -1760,6 +1875,80 @@ mod tests {
             radix * 1e3,
             stdlib / radix,
             574.0 / (radix * 1e3),
+        );
+    }
+
+    // Threaded poisson (PTRS + Knuth) per-element sweep must be BIT-for-bit identical to the serial
+    // sweep. Element i reads only u_blk[i]/v_blk[i] and writes its own slot, so any partition matches.
+    #[test]
+    fn poisson_threaded_matches_serial_bits() {
+        let n = (1usize << 13) + 321; // above threshold, non-aligned
+        for &(lam, tag) in &[
+            (15.0_f64, "rejection"),
+            (3.0, "knuth"),
+            (30.0, "rejection2"),
+        ] {
+            let key = random_key((lam as u64) * 7 + 1);
+            let serial = if lam < 10.0 {
+                poisson_knuth_with(key, n, lam, 1)
+            } else {
+                poisson_rejection_with(key, n, lam, 1)
+            };
+            let threaded = if lam < 10.0 {
+                poisson_knuth_with(key, n, lam, 8)
+            } else {
+                poisson_rejection_with(key, n, lam, 8)
+            };
+            assert_eq!(
+                serial, threaded,
+                "poisson {tag} lam={lam} threaded != serial"
+            );
+        }
+    }
+
+    // random_poisson vs JAX 0.10.2 CPU (jaxvenv, jit'd, min-of-7, 1M): lam=15 (PTRS rejection)=238ms,
+    // lam=3 (Knuth)=172ms. Same-invocation A/B: serial = threads=1, threaded = default fan-out.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_random_poisson_vs_jax() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let key = random_key(21);
+        let threads = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let p15_ser = best(&|| {
+            std::hint::black_box(poisson_rejection_with(key, n, 15.0, 1));
+        });
+        let p15 = best(&|| {
+            std::hint::black_box(poisson_rejection_with(key, n, 15.0, threads));
+        });
+        let p3_ser = best(&|| {
+            std::hint::black_box(poisson_knuth_with(key, n, 3.0, 1));
+        });
+        let p3 = best(&|| {
+            std::hint::black_box(poisson_knuth_with(key, n, 3.0, threads));
+        });
+        println!(
+            "[poisson 1M vs JAX] lam=15 rejection: serial={:.1}ms threaded={:.1}ms ({:.2}x self | JAX 238, {:.1}x) | lam=3 knuth: serial={:.1}ms threaded={:.1}ms ({:.2}x self | JAX 172, {:.1}x)",
+            p15_ser * 1e3,
+            p15 * 1e3,
+            p15_ser / p15,
+            238.0 / (p15 * 1e3),
+            p3_ser * 1e3,
+            p3 * 1e3,
+            p3_ser / p3,
+            172.0 / (p3 * 1e3),
         );
     }
 

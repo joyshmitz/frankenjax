@@ -12576,3 +12576,23 @@ Measured 1M (5975WX, min-of-7): stdlib-sort **127.6ms** -> radix **48.8ms = 2.62
 routes through `random_permutation`, so it inherits the win. n > u32::MAX (>4e9 elems, absurd) falls back to
 stdlib. NEXT (lower-EV): the radix is serial — `radix_pairs_ascending_parallel` (MSD + parallel per-bucket LSD)
 exists in tensor_ops and could roughly halve the 48.8ms, but 11.8x vs JAX is already a decisive win.
+
+## 2026-07-03 - PARTIAL WIN (2.15x/1.79x self; narrows loss but still trails JAX): threaded poisson per-element PTRS/Knuth sweep (BlackThrush)
+
+`random_poisson` drew its uniform blocks threaded but ran the per-element Hörmann-PTRS (lam>=10) / Knuth (lam<10)
+accept/step loop SERIALLY — and the PTRS step evaluates an `lgamma` per element per iteration. Factored the PTRS
+step into a pure `poisson_ptrs_step` and threaded both sweeps (`poisson_rejection_with`/`poisson_knuth_with` take
+an explicit thread count; the top-level fns read a `poisson_parallel_threads` gate at 1<<13). BIT-IDENTICAL to the
+serial sweep (each element reads only u_blk[i]/v_blk[i], writes its own slot; guard
+`poisson_threaded_matches_serial_bits` at n>threshold for lam=3/15/30 + `random_poisson_matches_jax_reference_f32`
+golden + full fj-lax lib 1748 pass).
+
+Measured 1M (5975WX, min-of-7): lam=15 rejection serial **779.9ms -> threaded 363.3ms = 2.15x self**; lam=3 knuth
+serial **332.2ms -> threaded 185.2ms = 1.79x self**. vs JAX 0.10.2 CPU (jaxvenv, jit'd) poisson(lam=15)=238ms,
+poisson(lam=3)=172ms: fj was 3.4x / 2.1x SLOWER, now **1.5x / 1.1x slower (0.66x / 0.93x)** — the loss is NARROWED
+but fj still trails. WHY the ~2x ceiling (not ~10x): the threaded per-element lgamma loop is only ~half the cost;
+the rest is the threaded uniform draws (2 blocks/iteration for PTRS) + the serial per-iteration convergence
+reductions (`accepted.all()`/`log_prod.any()` over 1M) + the overwrite-on-every-acceptance semantics reprocessing
+ALL elements each of ~15-20 iterations. Beating JAX here needs an algorithmic change (skip-accepted mask like
+JAX's `where(accepted,...)`) that would ALTER the current overwrite semantics — not attempted (bit-exactness risk).
+Landed as a safe no-regression 2x self-improvement; poisson remains a residual JAX loss, unlike gamma/beta/dirichlet.
