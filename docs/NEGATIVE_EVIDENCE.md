@@ -2,6 +2,32 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 2.61x: scalar-broadcast bitwise/shift (x OP k) THREADED — 16M i64 shift 55.3ms -> 21.2ms, bit-identical (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `lib.rs` (`eval_bitwise_binary`). Remote via
+  rch (`CARGO_TARGET_DIR=.../blackthrush`).
+- GAP: CobaltForge threaded the tensor⊗tensor bitwise arms (`eval_bitwise_tensor_same_shape`,
+  ~3.7-4x) but the scalar⊗tensor BROADCAST arms — `x >> k`, `x & mask`, `x << k`
+  (quantization / bit-packing, the common form) — were left SERIAL
+  (`vals.iter().map(apply_bitwise_binary_*).collect()`, ~4.6 GB/s). 10 dense arms
+  (I64/I32/U32/U64, both operand orders).
+- LEVER: new `threaded_scalar_bitwise_map<T>(vals, f)` — the SAME proven
+  `threaded_index_fill_into` primitive (calloc'd output + per-index closure across scoped
+  threads, above `CHEAP_BINARY_PARALLEL_MIN`), generic over the element type. Wired all 10
+  scalar⊗tensor dense arms through it; below the gate it stays the serial collect. The
+  scalar-broadcast case reads ONE input + writes one output, so it is MORE thread-favorable
+  than the two-input tensor⊗tensor case. Bit-identical (per-index, lane-independent).
+- MEASURED (rch, same-invocation min-of-8 A/B, `--test-threads=1` contention-free,
+  `bench_scalar_bitwise_shift_threaded_vs_serial`, 16M i64 `>> 3`):
+  **serial 55.344ms -> threaded 21.182ms = 2.61x.**
+- Correctness: `threaded_scalar_bitwise_bit_identical_to_serial` (i64/u64/u32 × and/or/xor/
+  shl/shra/shrl, tensor⊗scalar) + 33 existing bitwise/shift tests all GREEN. EV: KEEP.
+- Residual / follow-up: threaded fj lands at ~12 GB/s vs JAX ~20-24 GB/s — the per-element
+  `apply_bitwise_binary_*` match-dispatch (6-way branch per element, not hoisted) is now the
+  cap, not memory BW. Hoisting the primitive match out of the per-element closure (monomorphic
+  op per thread, cf. [[project_hoist_op_match_vectorize_lever]]) would push toward the ~38 GB/s
+  add-path ceiling and past JAX — separate lever, not done here.
+
 ## 2026-07-04 - WIN: argmax/argmin full-reduction THREADED extended to f32 (3.62x) + i64 (1.93x), bit-identical (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. File: `tensor_ops.rs`. Follow-up to the same-day

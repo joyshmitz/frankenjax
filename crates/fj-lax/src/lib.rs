@@ -1932,6 +1932,36 @@ fn bitwise_broadcast_flat_index(multi: &[usize], strides: &[usize]) -> usize {
     multi.iter().zip(strides.iter()).map(|(&m, &s)| m * s).sum()
 }
 
+/// Map a dense integer slice through a per-element scalar-bitwise closure, threading
+/// the fill above the DRAM-bound gate (`CHEAP_BINARY_PARALLEL_MIN`) via the shared
+/// `threaded_index_fill_into` primitive — the SAME lever CobaltForge used for the
+/// tensor⊗tensor bitwise arms and select/clamp/slice. The scalar⊗tensor broadcast
+/// (`x >> k`, `x & mask`, `x << k` — quantization / bit-packing) was still serial
+/// (`iter().map().collect()`, ~4.9 GB/s); it reads ONE input + writes one output, so
+/// it is even more thread-favorable than the two-input tensor⊗tensor case. Bit-identical
+/// (per-index closure, lane-independent). Below the gate it stays the serial collect.
+#[inline]
+fn threaded_scalar_bitwise_map<T, F>(vals: &[T], f: F) -> Vec<T>
+where
+    T: Copy + Send + Sync + Default,
+    F: Fn(T) -> T + Sync,
+{
+    let n = vals.len();
+    if n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+        && crate::arithmetic::work_scaled_threads(n) > 1
+    {
+        let mut out = vec![T::default(); n];
+        crate::arithmetic::threaded_index_fill_into(
+            &mut out,
+            crate::arithmetic::work_scaled_threads(n),
+            |i| f(vals[i]),
+        );
+        out
+    } else {
+        vals.iter().map(|&v| f(v)).collect()
+    }
+}
+
 fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 2 {
         return Err(EvalError::ArityMismatch {
@@ -1987,10 +2017,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             // is Some for I64 and I32, but this arm is gated to I64. Bit-identical:
             // same apply_bitwise_binary_i64(scalar, v), same I64 dense storage.
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i64(primitive, *scalar, v))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i64(primitive, *scalar, v)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i64_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2022,10 +2051,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::I32 =>
         {
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i32(primitive, i64::from(*scalar), v))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i32(primitive, i64::from(*scalar), v)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2054,10 +2082,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::I32 =>
         {
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i32(primitive, v, i64::from(*scalar)))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i32(primitive, v, i64::from(*scalar))
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2087,10 +2114,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::I32 =>
         {
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i32(primitive, *scalar, v))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i32(primitive, *scalar, v)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2117,10 +2143,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::I32 =>
         {
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i32(primitive, v, *scalar))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i32(primitive, v, *scalar)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2147,10 +2172,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::U32 =>
         {
             if let Some(vals) = tensor.elements.as_u32_slice() {
-                let out: Vec<u32> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_u32(primitive, *scalar, v))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_u32(primitive, *scalar, v)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_u32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2181,10 +2205,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::U64 =>
         {
             if let Some(vals) = tensor.elements.as_u64_slice() {
-                let out: Vec<u64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_u64(primitive, *scalar, v))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_u64(primitive, *scalar, v)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_u64_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2219,10 +2242,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             // Dense I64 fast path (tensor⊗scalar direction): same as above with the
             // scalar as the rhs of apply_bitwise_binary_i64. Bit-identical.
             if let Some(vals) = tensor.elements.as_i64_slice() {
-                let out: Vec<i64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_i64(primitive, v, *scalar))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_i64(primitive, v, *scalar)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_i64_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2253,10 +2275,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::U32 =>
         {
             if let Some(vals) = tensor.elements.as_u32_slice() {
-                let out: Vec<u32> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_u32(primitive, v, *scalar))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_u32(primitive, v, *scalar)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_u32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -2287,10 +2308,9 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             if tensor.dtype == fj_core::DType::U64 =>
         {
             if let Some(vals) = tensor.elements.as_u64_slice() {
-                let out: Vec<u64> = vals
-                    .iter()
-                    .map(|&v| apply_bitwise_binary_u64(primitive, v, *scalar))
-                    .collect();
+                let out = threaded_scalar_bitwise_map(vals, |v| {
+                    apply_bitwise_binary_u64(primitive, v, *scalar)
+                });
                 return Ok(Value::Tensor(
                     TensorValue::new_u64_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -14471,6 +14491,116 @@ mod tests {
                 .collect();
             assert!(gu == wantu.as_slice(), "{prim:?} u64 threaded != serial");
         }
+    }
+
+    #[test]
+    fn threaded_scalar_bitwise_bit_identical_to_serial() {
+        // scalar⊗tensor shift/mask (x OP k) at >= gate engages the threaded dense map;
+        // compare bit-for-bit to the serial apply reference over i64/u64/u32 and all six
+        // bitwise/shift primitives (both fixed-scalar RHS — the quantization form).
+        let n = crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN + 257;
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
+        for prim in [
+            Primitive::BitwiseAnd,
+            Primitive::BitwiseOr,
+            Primitive::BitwiseXor,
+            Primitive::ShiftLeft,
+            Primitive::ShiftRightArithmetic,
+            Primitive::ShiftRightLogical,
+        ] {
+            let a: Vec<i64> = (0..n)
+                .map(|i| (i as i64).wrapping_mul(2_654_435_761) ^ 0x1234)
+                .collect();
+            let k = 3i64;
+            let ai = Value::Tensor(TensorValue::new_i64_values(shape.clone(), a.clone()).unwrap());
+            let got = eval_primitive(prim, &[ai, Value::scalar_i64(k)], &no_params()).unwrap();
+            let gi = got.as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            let want: Vec<i64> = a
+                .iter()
+                .map(|&v| super::apply_bitwise_binary_i64(prim, v, k))
+                .collect();
+            assert!(
+                gi == want.as_slice(),
+                "{prim:?} i64 scalar-tensor threaded != serial"
+            );
+
+            let au: Vec<u64> = (0..n)
+                .map(|i| (i as u64).wrapping_mul(11_400_714_819_323_198_485) ^ 0xABCD)
+                .collect();
+            let ku = 5u64;
+            let auv =
+                Value::Tensor(TensorValue::new_u64_values(shape.clone(), au.clone()).unwrap());
+            let gotu = eval_primitive(
+                prim,
+                &[auv, Value::Scalar(fj_core::Literal::U64(ku))],
+                &no_params(),
+            )
+            .unwrap();
+            let gu = gotu.as_tensor().unwrap().elements.as_u64_slice().unwrap();
+            let wantu: Vec<u64> = au
+                .iter()
+                .map(|&v| super::apply_bitwise_binary_u64(prim, v, ku))
+                .collect();
+            assert!(
+                gu == wantu.as_slice(),
+                "{prim:?} u64 scalar-tensor threaded != serial"
+            );
+
+            let a32: Vec<u32> = (0..n)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761) ^ 0xBEEF)
+                .collect();
+            let k32 = 7u32;
+            let a32v =
+                Value::Tensor(TensorValue::new_u32_values(shape.clone(), a32.clone()).unwrap());
+            let got32 = eval_primitive(
+                prim,
+                &[a32v, Value::Scalar(fj_core::Literal::U32(k32))],
+                &no_params(),
+            )
+            .unwrap();
+            let g32 = got32.as_tensor().unwrap().elements.as_u32_slice().unwrap();
+            let want32: Vec<u32> = a32
+                .iter()
+                .map(|&v| super::apply_bitwise_binary_u32(prim, v, k32))
+                .collect();
+            assert!(
+                g32 == want32.as_slice(),
+                "{prim:?} u32 scalar-tensor threaded != serial"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scalar_bitwise_shift_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let vals: Vec<i64> = (0..n)
+            .map(|i| (i as i64).wrapping_mul(6_364_136_223_846_793_005))
+            .collect();
+        let time_it = |label: &str, f: &dyn Fn() -> Vec<i64>| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("SCALARBIT {label}: {:.3}ms", b * 1e3);
+        };
+        // Same-invocation, contention-immune A/B (min of 8 each, back-to-back).
+        time_it("shr_i64_16M_serial", &|| {
+            vals.iter()
+                .map(|&v| super::apply_bitwise_binary_i64(Primitive::ShiftRightLogical, v, 3))
+                .collect()
+        });
+        time_it("shr_i64_16M_threaded", &|| {
+            super::threaded_scalar_bitwise_map(&vals, |v| {
+                super::apply_bitwise_binary_i64(Primitive::ShiftRightLogical, v, 3)
+            })
+        });
     }
 
     fn no_params() -> BTreeMap<String, String> {
