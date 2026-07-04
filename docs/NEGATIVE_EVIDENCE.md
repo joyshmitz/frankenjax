@@ -2,6 +2,33 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - NO-SHIP 1.05x: complex_exp SoA SIMD (sincos vectorized, e^re scalar) — cexp is exp-BOUND, dropped (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_exp` complex branch).
+  Remote via rch (`CARGO_TARGET_DIR=.../blackthrush`), `--test-threads=1` isolated. Sibling
+  attempt to the SHIPPED clog SIMD win (faa58c03, 1.58x).
+- HYPOTHESIS: `complex_exp(re,im) = (e^re·cos(im), e^re·sin(im))` — extend the clog SoA f64x8
+  pattern by vectorizing the `sin(im)`/`cos(im)` with the SIMD `sin_f64x8`/`cos_f64x8` blocks.
+  `e^re` MUST stay scalar: SIMD-poly exp REGRESSES 0.79x on this no-FMA host
+  ([[project_simd_poly_exp_fma_finding]]), which is exactly why real `eval_exp` already uses
+  scalar `f64::exp`. So only the sincos (1 of 2 transcendentals/element) could vectorize.
+- MEASURED (rch, same-invocation min-of-6 A/B, `--test-threads=1`, 16M Complex64,
+  `bench_complex_exp_simd_vs_scalar`, OLD = threaded scalar map, NEW = threaded SoA SIMD):
+  **scalar-threaded 77.616ms → simd-threaded 74.176ms = 1.05x.** ~0-gain → DROPPED (reverted;
+  correctness `complex_exp_simd_matches_scalar` had PASSED, so it was correct, just not worth
+  the code). The scalar `e^re` dominates the per-element cost, so vectorizing the sincos alone
+  barely moves it — cexp is exp-BOUND, not sincos-bound.
+- BLOCKER SURFACED for the complex-transcendental family: clog (SHIPPED 1.58x) was the ONE
+  member composable from non-exp SIMD blocks (log_f64x8 + atan2_f64x8). The remaining measured
+  gaps — cexp (3.65x), ctanh (3.88x), csin (3.31x) — ALL route through `exp`/`sinh`/`cosh`,
+  and exp is deliberately scalar on this no-FMA host (SIMD-poly exp = 0.79x). Their sincos
+  parts vectorize but exp dominates (cexp proved this at 1.05x). So the family is now
+  **exp-FMA-policy-gated**, the same root blocker as GEMM/tanh/softmax
+  ([[project_fma_lever_policy_blocked]]): a global `+fma` build flag would unlock SIMD exp
+  (2.20x with FMA) and the whole exp-based complex + real transcendental tier at once — ONE
+  maintainer decision. Do NOT re-attempt SIMD cexp/csin/ctanh without `+fma`.
+
+
 ## 2026-07-04 - WIN 1.58x: complex_log dense SoA f64x8 SIMD (composes log_f64x8 + atan2_f64x8) — clog 6.88x→4.7x vs JAX (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_log` complex branch).
