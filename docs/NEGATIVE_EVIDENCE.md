@@ -2,6 +2,45 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 3.80x vs ORIG: row-wise L2-normalize recognized as a fused (row-parallel) RANK-PRESERVING interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::l2_normalize_2d`). First
+  RANK-PRESERVING (full [rows,cols] output) member of my superinstruction set outside the softmax/norm
+  activations — row-wise L2-normalize `x / ‖x‖₂ = x / sqrt(Σ x²)` (`jax.nn.normalize` with the default
+  L2 order, no epsilon; the ubiquitous embedding unit-normalization). A 5-equation graph
+  `Mul(x,x) → ReduceSum(axis=1) → Sqrt → BroadcastInDim → Div`, one f64 [rows,cols] input → one
+  [rows,cols] output (rank-PRESERVING, unlike the reducing `l2_norm_2d`/moments). NO transcendentals
+  (sum-of-squares + `Sqrt` + a true divide). The general fuser cannot fuse it (the reduction breaks the
+  elementwise fuser), so the decomposed path materializes the full [rows,cols] squared + broadcast
+  intermediates plus the reduction Vec. Worktree audit: HEAD==origin/main (my l2_norm tip a4d1a0bd), no
+  unlanded win to land.
+- LEVER: a top-level 1-input superinstruction for the exact 5-eq finite dense f64 L2-normalize graph,
+  computed via the row-parallel `l2_normalize_2d`. BIT-IDENTICAL: `l2_normalize_row_into` does an
+  index-order sum of `x[i]·x[i]` (matching `Mul(x,x)` + per-row `ReduceSum`), then `f64::sqrt`
+  (correctly-rounded = `Sqrt`), then a per-element TRUE division `x[i] / norm` — matching the `Div`
+  primitive, NOT a reciprocal-multiply (which would differ in the last bit; the shipped RMSNorm path
+  legitimately uses `Rsqrt→Mul` because ITS graph does). The broadcast must restore exactly `rows,cols`;
+  finite dense rank-2 f64 only, else falls through (matching the graph's NaN/Inf propagation via the
+  generic path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed l2_normalize_2d
+  -m 3 -s 20`, 4096x1024, x=softmax_input; VERY TIGHT CIs → low variance):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/l2_normalize_2d/orig_decomposed_4096x1024` | 28.605 ms |
+  | `compiled_dispatch/l2_normalize_2d/fast_eval_jaxpr_4096x1024` | 7.5316 ms |
+
+  Ratio vs ORIG: **0.2633x time / 3.80x faster** (worst-case CI 3.73x, best 3.88x; robustly ≥2x).
+  Smaller multiple than the rank-reducing norms/moments (which output only [rows]) because the fused
+  path must still WRITE the full [rows,cols] output (7.53 ms); the win is eliminating the `sq` +
+  `norm_b` intermediates and fusing the divide — consistent with the full-output layer-norm (3.74x).
+- VALIDATION: `eval_top_level_l2_normalize_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path);
+  fj-lax `nn::` 61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 5.86x vs ORIG: row-wise L2 (Euclidean/Frobenius) norm recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::l2_norm_2d`). Branches OUT of

@@ -1563,6 +1563,67 @@ fn build_l2_norm_2d_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_l2_normalize_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+    let x = VarId(1);
+    let sq = VarId(2);
+    let s = VarId(3);
+    let norm = VarId(4);
+    let norm_b = VarId(5);
+    let out = VarId(6);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    Jaxpr::new(
+        vec![x],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Var(x)],
+                outputs: smallvec::smallvec![sq],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(sq)],
+                outputs: smallvec::smallvec![s],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sqrt,
+                inputs: smallvec::smallvec![Atom::Var(s)],
+                outputs: smallvec::smallvec![norm],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::BroadcastInDim,
+                inputs: smallvec::smallvec![Atom::Var(norm)],
+                outputs: smallvec::smallvec![norm_b],
+                params: bcast,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Var(norm_b)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_logsumexp_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let x = VarId(1);
     let max = VarId(2);
@@ -2367,6 +2428,23 @@ fn eval_l2_norm_2d_decomposed(input: &Value) -> Value {
     eval_primitive(Primitive::Sqrt, std::slice::from_ref(&s), &empty).expect("l2_norm")
 }
 
+fn eval_l2_normalize_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let empty = BTreeMap::new();
+    let sq = eval_primitive(Primitive::Mul, &[input.clone(), input.clone()], &empty)
+        .expect("square");
+    let s = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&sq), &reduce_axis1)
+        .expect("reduce sum sq");
+    let norm = eval_primitive(Primitive::Sqrt, std::slice::from_ref(&s), &empty).expect("sqrt");
+    let norm_b =
+        eval_primitive(Primitive::BroadcastInDim, &[norm], &bcast).expect("broadcast norm");
+    eval_primitive(Primitive::Div, &[input.clone(), norm_b], &empty).expect("l2_normalize")
+}
+
 fn eval_logsumexp_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let bcast = BTreeMap::from([
@@ -3081,6 +3159,24 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 eval_jaxpr(black_box(&l2_norm_jaxpr), std::slice::from_ref(&softmax_input)).unwrap(),
+            )
+        })
+    });
+    let l2_normalize_jaxpr = build_l2_normalize_2d_jaxpr(rows, cols);
+    group.bench_function("l2_normalize_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_l2_normalize_2d_decomposed(
+                black_box(&softmax_input),
+                rows,
+                cols,
+            ))
+        })
+    });
+    group.bench_function("l2_normalize_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(black_box(&l2_normalize_jaxpr), std::slice::from_ref(&softmax_input))
+                    .unwrap(),
             )
         })
     });

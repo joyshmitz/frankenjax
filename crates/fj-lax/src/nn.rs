@@ -788,6 +788,69 @@ pub fn l2_norm_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// L2-normalize a single row in place, `x / sqrt(Σ x²)`, writing into `dst`. Bit-identical to the
+/// decomposed `Mul(x,x) → ReduceSum → Sqrt → BroadcastInDim → Div` graph: an index-order sum of
+/// `x[i]·x[i]`, then `f64::sqrt` (= the `Sqrt` primitive), then a per-element TRUE division
+/// `x[i] / norm` (matching the `Div` primitive — NOT a reciprocal-multiply, which would differ in the
+/// last bit). Callers guarantee equal-length `src`/`dst`.
+fn l2_normalize_row_into(src: &[f64], dst: &mut [f64]) {
+    let mut sum_sq = 0.0;
+    for &value in src {
+        sum_sq += value * value;
+    }
+    let norm = sum_sq.sqrt();
+    for (d, &value) in dst.iter_mut().zip(src.iter()) {
+        *d = value / norm;
+    }
+}
+
+/// L2-normalize along the last axis of a 2D array, `x / ‖x‖₂` per row (`jax.nn.normalize` with the
+/// default L2 order, no epsilon). Output keeps the input shape [rows,cols] (rank-PRESERVING, unlike
+/// the reducing `l2_norm_2d`). ROW-PARALLEL and BIT-IDENTICAL to the decomposed
+/// `Mul(x,x) → ReduceSum(axis=1) → Sqrt → BroadcastInDim → Div` graph via [`l2_normalize_row_into`]:
+/// index-order sum-of-squares, correctly-rounded `f64::sqrt`, then true per-element division. Rows
+/// are independent so only the outer loop is threaded, above the `softmax_2d_thread_count` work gate.
+/// Used by the interpreter L2-normalize superinstruction.
+#[must_use]
+pub fn l2_normalize_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let len = checked_2d_row_major_len("2D l2_normalize", x, rows, cols);
+    let mut result = vec![0.0; len];
+    if cols == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, len);
+    if threads <= 1 {
+        for i in 0..rows {
+            let start = i * cols;
+            l2_normalize_row_into(&x[start..start + cols], &mut result[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut dst_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let elem_count = row_count * cols;
+            let (dst_block, dst_tail) = dst_rest.split_at_mut(elem_count);
+            dst_rest = dst_tail;
+            let src_block = &x[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (src_row, dst_row) in src_block
+                    .chunks_exact(cols)
+                    .zip(dst_block.chunks_exact_mut(cols))
+                {
+                    l2_normalize_row_into(src_row, dst_row);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
 /// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
 /// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so
