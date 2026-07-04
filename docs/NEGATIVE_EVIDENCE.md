@@ -12560,3 +12560,19 @@ strongholds — none is a contained fj lever:
 
 RULE: pad/concat contiguous and scattered-gather are XLA memory-bandwidth strongholds; do NOT chase them as fj
 wins. Benches retained as the memory-bound loss contrast. No production code change; boundary evidence only.
+
+## 2026-07-03 - WIN (2.62x self; 4.5x -> 11.8x vs JAX): random_permutation stable argsort was stdlib comparison sort, now u32 radix (BlackThrush)
+
+`random_permutation` (JAX's iterated `lax.sort_key_val(random_bits, x, is_stable=True)`) reordered `x` each round
+via the stdlib **indirect comparison sort** `order.sort_by_key(|&i| sort_keys[i])` (O(n log n), a cache-missing
+`sort_keys[i]` gather per compare) plus a second gather — even though the sort keys are u32 and the values are
+`0..n`, i.e. a textbook STABLE 4-pass LSD **radix** (O(n)). Replaced with `stable_radix_apply_u32` (byte-stable
+counting sort, ties keep index order → BIT-IDENTICAL to the stable comparison argsort; guard
+`permutation_radix_matches_stdlib_bits` incl. tie-heavy keys + `random_permutation` JAX golden + full fj-lax lib
+1746 pass). `FJ_PERM_STDLIB` forces the old path for a same-invocation A/B.
+
+Measured 1M (5975WX, min-of-7): stdlib-sort **127.6ms** -> radix **48.8ms = 2.62x self**. vs JAX 0.10.2 CPU
+(jaxvenv, jit'd) `permutation(1M)=574ms`: fj was already 4.5x ahead, now **11.8x**. `random_choice(replace=false)`
+routes through `random_permutation`, so it inherits the win. n > u32::MAX (>4e9 elems, absurd) falls back to
+stdlib. NEXT (lower-EV): the radix is serial — `radix_pairs_ascending_parallel` (MSD + parallel per-bucket LSD)
+exists in tensor_ops and could roughly halve the 48.8ms, but 11.8x vs JAX is already a decisive win.

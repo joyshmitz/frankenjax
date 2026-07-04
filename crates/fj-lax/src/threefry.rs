@@ -881,6 +881,14 @@ pub fn random_permutation(key: PRNGKey, n: usize) -> Vec<usize> {
     let uint32max = f64::from(u32::MAX);
     let num_rounds = (exponent * (n as f64).ln() / uint32max.ln()).ceil() as usize;
 
+    // The permutation values are 0..n, so for n <= u32::MAX they fit a u32 and each round's
+    // stable argsort-by-u32-key is a 4-pass LSD radix (O(n)) instead of the stdlib indirect
+    // comparison sort (O(n log n) with a cache-missing `sort_keys[i]` gather per compare) plus
+    // a second gather. Both are STABLE, so the permutation is BIT-IDENTICAL. `FJ_PERM_STDLIB`
+    // forces the old path for a same-invocation A/B. n > u32::MAX (absurd, >4e9 elems) also
+    // falls back.
+    let radix_ok = n <= u32::MAX as usize && std::env::var_os("FJ_PERM_STDLIB").is_none();
+
     let mut x: Vec<usize> = (0..n).collect();
     let mut key = key;
     for _ in 0..num_rounds {
@@ -890,11 +898,51 @@ pub fn random_permutation(key: PRNGKey, n: usize) -> Vec<usize> {
         let sort_keys = generate_u32_bits(subkey, n);
         // Stable ascending argsort by the u32 sort keys (== lax.sort_key_val,
         // is_stable=True), then reorder x by it.
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| sort_keys[i]);
-        x = order.into_iter().map(|i| x[i]).collect();
+        if radix_ok {
+            x = stable_radix_apply_u32(&sort_keys, &x);
+        } else {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by_key(|&i| sort_keys[i]);
+            x = order.into_iter().map(|i| x[i]).collect();
+        }
     }
     x
+}
+
+/// Stable ascending sort of `(sort_keys[i], values[i])` pairs by the u32 key, returning the
+/// values in key order — the "apply a stable argsort of `sort_keys` to `values`" that
+/// `random_permutation` needs (JAX `lax.sort_key_val(sort_keys, values, is_stable=True)`).
+/// 4-pass LSD radix over the u32 key: byte-stable counting sort ping-ponged between two
+/// buffers (4 swaps → result back in the primary). Ties keep input (index-ascending) order,
+/// so the output is BIT-IDENTICAL to a stable comparison argsort + gather (guard
+/// `permutation_radix_matches_stdlib_bits`). Caller guarantees `values[i] < n <= u32::MAX`.
+fn stable_radix_apply_u32(sort_keys: &[u32], values: &[usize]) -> Vec<usize> {
+    let n = values.len();
+    let mut a: Vec<(u32, u32)> = (0..n).map(|i| (sort_keys[i], values[i] as u32)).collect();
+    let mut b: Vec<(u32, u32)> = vec![(0u32, 0u32); n];
+    let mut src = &mut a;
+    let mut dst = &mut b;
+    for byte in 0..4 {
+        let shift = byte * 8;
+        let mut counts = [0usize; 256];
+        for &(k, _) in src.iter() {
+            counts[((k >> shift) & 0xff) as usize] += 1;
+        }
+        let mut sum = 0usize;
+        for c in counts.iter_mut() {
+            let cc = *c;
+            *c = sum;
+            sum += cc;
+        }
+        for &pair in src.iter() {
+            let bucket = ((pair.0 >> shift) & 0xff) as usize;
+            dst[counts[bucket]] = pair;
+            counts[bucket] += 1;
+        }
+        std::mem::swap(&mut src, &mut dst);
+    }
+    // 4 (even) swaps → `src` aliases `a`, holding the sorted pairs.
+    src.iter().map(|&(_, v)| v as usize).collect()
 }
 
 /// Sample `n_draws` indices from `0..n_inputs`, matching `jax.random.choice` in
@@ -1643,6 +1691,75 @@ mod tests {
             thr * 1e3,
             ser / thr,
             920.0 / (thr * 1e3),
+        );
+    }
+
+    // The 4-pass LSD radix `stable_radix_apply_u32` must be BIT-for-bit identical to the stable
+    // stdlib comparison argsort + gather, INCLUDING heavy key ties (where stability matters).
+    #[test]
+    fn permutation_radix_matches_stdlib_bits() {
+        for &n in &[1usize, 2, 17, 4096, 100_003] {
+            // Draw real u32 sort keys, and a tie-heavy variant (keys mod 7) to stress stability.
+            let raw = generate_u32_bits(random_key(n as u64 + 3), n);
+            for tie_mod in [0u32, 7, 1] {
+                let sort_keys: Vec<u32> = if tie_mod == 0 {
+                    raw.clone()
+                } else {
+                    raw.iter().map(|&k| k % tie_mod.max(1)).collect()
+                };
+                let values: Vec<usize> = (0..n).collect();
+                let radix = stable_radix_apply_u32(&sort_keys, &values);
+                let mut order: Vec<usize> = (0..n).collect();
+                order.sort_by_key(|&i| sort_keys[i]);
+                let stdlib: Vec<usize> = order.into_iter().map(|i| values[i]).collect();
+                assert_eq!(radix, stdlib, "radix != stdlib at n={n} tie_mod={tie_mod}");
+            }
+        }
+    }
+
+    // random_permutation vs JAX 0.10.2 CPU (jaxvenv, jit'd, min-of-7): permutation(1M)=574ms
+    // (XLA does num_rounds full argsorts). fj replaced the stdlib indirect comparison sort +
+    // gather with a stable 4-pass u32 LSD radix. Same-invocation A/B via FJ_PERM_STDLIB.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_random_permutation_vs_jax() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let key = random_key(11);
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            b
+        };
+        // Serial stdlib reference: exactly the pre-radix path (split + generate_u32_bits shared).
+        let num_rounds = (3.0_f64 * (n as f64).ln() / f64::from(u32::MAX).ln()).ceil() as usize;
+        let stdlib = best(&|| {
+            let mut x: Vec<usize> = (0..n).collect();
+            let mut k = key;
+            for _ in 0..num_rounds {
+                let (nk, subkey) = random_split(k);
+                k = nk;
+                let sort_keys = generate_u32_bits(subkey, n);
+                let mut order: Vec<usize> = (0..n).collect();
+                order.sort_by_key(|&i| sort_keys[i]);
+                x = order.into_iter().map(|i| x[i]).collect();
+            }
+            std::hint::black_box(x);
+        });
+        let radix = best(&|| {
+            std::hint::black_box(random_permutation(key, n));
+        });
+        println!(
+            "[permutation 1M vs JAX] stdlib-sort={:.1}ms radix={:.1}ms ({:.2}x self | JAX 574, {:.1}x)",
+            stdlib * 1e3,
+            radix * 1e3,
+            stdlib / radix,
+            574.0 / (radix * 1e3),
         );
     }
 
