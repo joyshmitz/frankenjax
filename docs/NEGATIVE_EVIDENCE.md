@@ -2,6 +2,42 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 3.78x vs ORIG: row-wise Euclidean (L2) distance recognized as a fused (row-parallel) 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::euclidean_distance_2d`).
+  A DISTANCE metric (dissimilarity), distinct from cosine's similarity and var's moment: Euclidean/L2
+  distance = `√Σ(a - b)²` along the last axis, the ubiquitous kNN / clustering / contrastive-loss
+  metric. A TWO-input, 4-equation graph `Sub(a, b) → Mul(square) → ReduceSum(axis=1) → Sqrt`, f64
+  [rows,cols]×2 → [rows] (rank-reducing). NO transcendentals (`Sqrt` = `f64::sqrt`, IEEE-exact). The
+  general fuser cannot fuse it (the reduction breaks the elementwise fuser), so the decomposed path
+  materializes two full [rows,cols] intermediates (`a-b`, `(a-b)²`). Worktree audit: HEAD==origin/main,
+  no unlanded win.
+- LEVER: a top-level 2-input superinstruction for the exact 4-eq finite dense f64 L2-distance graph,
+  computed via the row-parallel `euclidean_distance_2d`. BIT-IDENTICAL: `euclidean_distance_row` does
+  an index-order sum of `(a[i]-b[i])²` then `sum_sq.sqrt()`, matching the graph's `Sub`/`Mul`/
+  `ReduceSum`/`Sqrt` exactly (`Sub` operand order enforced a-then-b — non-commutative;
+  `Mul(diff,diff)` requires the same var on both operands). Finite dense rank-2 f64 only, else falls
+  through.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed euclidean -m 3
+  -s 20`, 4096x1024, a=softmax_input / b=layer_norm_input; the jax-cc worker was heavily contended
+  during this window — WIDE CIs — so absolute ms carry variance but the ratio floor is safe):
+
+  | row | median | (CI low..high) |
+  | --- | ---: | :--- |
+  | `compiled_dispatch/euclidean_distance_2d/orig_decomposed_4096x1024` | 56.037 ms | 49.839..62.683 |
+  | `compiled_dispatch/euclidean_distance_2d/fast_eval_jaxpr_4096x1024` | 14.821 ms | 13.238..16.417 |
+
+  Ratio vs ORIG: **0.264x time / 3.78x faster** (worst-case CI orig-low/fast-high = 3.04x; robustly
+  ≥2x). Smaller multiple than the bigger transcendental-free reductions (var 13.38x / cosine 9.59x)
+  because L2-distance is only a 4-eq graph (fewer intermediates to save); the fused absolute ~14.8 ms
+  is contention-inflated (var/cosine fused were 4.7/7.6 ms in cleaner windows).
+- VALIDATION: `eval_top_level_euclidean_distance_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on random f64; nonfinite falls through); fj-lax `nn::` 61/61 GREEN; all
+  16 superinstruction parity tests GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 6.12x vs ORIG: row-wise Euclidean distance recognized as a fused 2-input interpreter superinstruction (SlateBridge)
 
 - Agent: SlateBridge. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::euclidean_distance_2d`).
