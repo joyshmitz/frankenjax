@@ -670,6 +670,67 @@ pub fn pearson_correlation_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) ->
     result
 }
 
+/// Forward KL divergence of a single pair of rows, `Σ p·log(p/q)`, bit-identical to the decomposed
+/// `Div(p,q) → Log → Mul(p,·) → ReduceSum` graph: an index-order sum of `p[i]·ln(p[i]/q[i])`.
+/// `Log` = the same `.ln()` the `Log` primitive dispatches (scalar-bit-identical, per the
+/// softmax/logsumexp superinstructions). Degenerate `q=0`/`p=0` entries propagate inf/NaN exactly as
+/// the graph does. Callers guarantee equal-length rows.
+fn kl_divergence_row(p: &[f64], q: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for (&pv, &qv) in p.iter().zip(q.iter()) {
+        sum += pv * (pv / qv).ln();
+    }
+    sum
+}
+
+/// Forward KL divergence `Σ p·log(p/q)` along the last axis of two 2D arrays, one scalar per row
+/// (the information-theoretic divergence at the heart of distillation, VAE, and RLHF objectives).
+/// ROW-PARALLEL and BIT-IDENTICAL to the decomposed `Div → Log → Mul → ReduceSum` graph (index-order
+/// reduction via [`kl_divergence_row`]); rows are independent so only the outer loop is threaded,
+/// above the `softmax_2d_thread_count` work gate. Used by the interpreter KL-divergence
+/// superinstruction. Callers guarantee `p`/`q` share the same `rows,cols` layout.
+#[must_use]
+pub fn kl_divergence_2d(p: &[f64], q: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D kl_divergence p", p, rows, cols);
+    let _ = checked_2d_row_major_len("2D kl_divergence q", q, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = kl_divergence_row(&p[start..start + cols], &q[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let p_block = &p[row0 * cols..(row0 + row_count) * cols];
+            let q_block = &q[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = kl_divergence_row(
+                        &p_block[start..start + cols],
+                        &q_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Manhattan (L1) distance of a single pair of rows, `Σ|a-b|`, bit-identical to the decomposed
 /// `Sub -> Abs -> ReduceSum` graph: an index-order sum of `(a[i]-b[i]).abs()`.
 fn manhattan_distance_row(a: &[f64], b: &[f64]) -> f64 {

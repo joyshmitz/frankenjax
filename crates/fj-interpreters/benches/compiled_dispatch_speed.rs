@@ -679,6 +679,55 @@ fn build_manhattan_distance_2d_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_kl_divergence_2d_jaxpr() -> Jaxpr {
+    let p = VarId(1);
+    let q = VarId(2);
+    let ratio = VarId(3);
+    let log_ratio = VarId(4);
+    let weighted = VarId(5);
+    let out = VarId(6);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    Jaxpr::new(
+        vec![p, q],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(p), Atom::Var(q)],
+                outputs: smallvec::smallvec![ratio],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Log,
+                inputs: smallvec::smallvec![Atom::Var(ratio)],
+                outputs: smallvec::smallvec![log_ratio],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(p), Atom::Var(log_ratio)],
+                outputs: smallvec::smallvec![weighted],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(weighted)],
+                outputs: smallvec::smallvec![out],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_pearson_correlation_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let a = VarId(1);
     let b = VarId(2);
@@ -1466,6 +1515,18 @@ fn eval_manhattan_distance_2d_decomposed(a: &Value, b: &Value) -> Value {
     .expect("sum abs")
 }
 
+fn eval_kl_divergence_2d_decomposed(p: &Value, q: &Value) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let empty = BTreeMap::new();
+    let ratio = eval_primitive(Primitive::Div, &[p.clone(), q.clone()], &empty).expect("p/q");
+    let log_ratio =
+        eval_primitive(Primitive::Log, std::slice::from_ref(&ratio), &empty).expect("log");
+    let weighted =
+        eval_primitive(Primitive::Mul, &[p.clone(), log_ratio], &empty).expect("p*log");
+    eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&weighted), &reduce_axis1)
+        .expect("kl sum")
+}
+
 fn eval_pearson_correlation_2d_decomposed(a: &Value, b: &Value, rows: usize, cols: usize) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let bcast = BTreeMap::from([
@@ -2123,6 +2184,19 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         b.iter(|| {
             black_box(eval_jaxpr(black_box(&manhattan_jaxpr), black_box(&manhattan_args)).unwrap())
         })
+    });
+    let kl_jaxpr = build_kl_divergence_2d_jaxpr();
+    let kl_args = [softmax_input.clone(), layer_norm_input.clone()];
+    group.bench_function("kl_divergence_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_kl_divergence_2d_decomposed(
+                black_box(&kl_args[0]),
+                black_box(&kl_args[1]),
+            ))
+        })
+    });
+    group.bench_function("kl_divergence_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| black_box(eval_jaxpr(black_box(&kl_jaxpr), black_box(&kl_args)).unwrap()))
     });
     let pearson_jaxpr = build_pearson_correlation_2d_jaxpr(rows, cols);
     let pearson_args = [softmax_input.clone(), layer_norm_input.clone()];

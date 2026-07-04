@@ -1142,6 +1142,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_kl_divergence_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_manhattan_distance_2d_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -2623,6 +2627,106 @@ fn try_eval_top_level_pearson_correlation_2d_f64(
     }
 
     let output = fj_lax::nn::pearson_correlation_2d(a_v, b_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise forward KL divergence `Σ p·log(p/q)` along the
+/// last axis (the information-theoretic divergence at the heart of distillation / VAE / RLHF): the
+/// 4-equation, TWO-input graph `Div(p, q) → Log → Mul(p, ·) → ReduceSum(axis=1)`. Two f64 [rows,cols]
+/// inputs, one [rows] output (rank-reducing). The general fuser cannot fuse it (`Log` ∉ `cheap_op`
+/// AND the reduction breaks the elementwise fuser), so the decomposed path materializes three full
+/// [rows,cols] intermediates (`p/q`, `log(p/q)`, `p·log(p/q)`). Fused via the row-parallel
+/// `kl_divergence_2d`, whose index-order `Σ p·ln(p/q)` matches the graph bit-for-bit (`Log` = the same
+/// `.ln()` the `Log` primitive dispatches); finite dense rank-2 f64 only, else falls through.
+fn try_eval_top_level_kl_divergence_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 4
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let p = jaxpr.invars[0];
+    let q = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [div_eq, log_eq, mul_eq, sum_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    // ratio = p / q (Div non-commutative — numerator = p)
+    let ratio = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if div_eq.inputs.as_slice() != [Atom::Var(p), Atom::Var(q)] {
+        return None;
+    }
+    // log_ratio = Log(ratio)
+    let log_ratio = single_output_for_primitive(log_eq, Primitive::Log)?;
+    if log_eq.inputs.as_slice() != [Atom::Var(ratio)] {
+        return None;
+    }
+    // weighted = p * log_ratio (Mul commutative → either operand order)
+    let weighted = single_output_for_primitive(mul_eq, Primitive::Mul)?;
+    let mul_ok = matches!(
+        mul_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)]
+            if (*x == p && *y == log_ratio) || (*x == log_ratio && *y == p)
+    );
+    if !mul_ok {
+        return None;
+    }
+    // out = ReduceSum(weighted, axis=1)
+    let summed = single_output_for_param_primitive(sum_eq, Primitive::ReduceSum)?;
+    if summed != out
+        || sum_eq.inputs.as_slice() != [Atom::Var(weighted)]
+        || !axis1_reduce_params(&sum_eq.params)
+    {
+        return None;
+    }
+
+    let Value::Tensor(p_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(q_t) = &args[1] else {
+        return None;
+    };
+    if p_t.dtype != DType::F64
+        || q_t.dtype != DType::F64
+        || p_t.shape.dims.len() != 2
+        || q_t.shape.dims != p_t.shape.dims
+    {
+        return None;
+    }
+    let rows = p_t.shape.dims[0] as usize;
+    let cols = p_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let p_v = p_t.elements.as_f64_slice()?;
+    let q_v = q_t.elements.as_f64_slice()?;
+    if !p_v.iter().all(|value| value.is_finite()) || !q_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::kl_divergence_2d(p_v, q_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -21224,6 +21328,99 @@ mod tests {
             .expect("nonfinite manhattan falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite manhattan");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_kl_divergence_2d_jaxpr() -> Jaxpr {
+        let p = VarId(1);
+        let q = VarId(2);
+        let ratio = VarId(3);
+        let log_ratio = VarId(4);
+        let weighted = VarId(5);
+        let out = VarId(6);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        Jaxpr::new(
+            vec![p, q],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(p), Atom::Var(q)],
+                    outputs: smallvec![ratio],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(ratio)],
+                    outputs: smallvec![log_ratio],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(p), Atom::Var(log_ratio)],
+                    outputs: smallvec![weighted],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(weighted)],
+                    outputs: smallvec![out],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_kl_divergence_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        // KL needs positive p, q (p/q > 0) for finite outputs; use strictly-positive data.
+        let p_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.31).sin() * 0.4 + 1.5)
+            .collect();
+        let q_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.17).cos() * 0.3 + 1.2)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let p = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, p_data).expect("p input"),
+        );
+        let q = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, q_data).expect("q input"),
+        );
+        let jaxpr = make_kl_divergence_2d_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, &[p.clone(), q.clone()]).expect("fast kl");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[p, q]).expect("generic kl");
+        assert_eq!(fast, generic);
+
+        let mut p_nonfinite: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01 + 1.0).collect();
+        p_nonfinite[cols + 1] = f64::NAN;
+        let p_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, p_nonfinite)
+                .expect("nonfinite p"),
+        );
+        let q_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols).map(|idx| idx as f64 * 0.02 + 1.0).collect(),
+            )
+            .expect("finite q"),
+        );
+        let through_eval =
+            eval_jaxpr(&jaxpr, &[p_nf.clone(), q_ok.clone()]).expect("nonfinite kl falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[p_nf, q_ok]).expect("generic nonfinite kl");
         assert_eq!(through_eval, through_generic);
     }
 
