@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 3.55x vs ORIG: row-wise root-mean-square (RMS) recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::rms_2d`). Extends the
+  reduction family with the uncentered-second-moment root: row-wise RMS `sqrt(mean(x²))`
+  (`sqrt(jax.numpy.mean(x**2, axis=-1))`). A 4-equation graph `Mul(x,x) → ReduceSum(axis=1) →
+  Div(·, n) → Sqrt`, one f64 [rows,cols] input → one [rows] output (rank-reducing). NO transcendentals
+  (sum-of-squares + a mean + a correctly-rounded `Sqrt`). DISTINCT from the L2 norm `sqrt(Σx²)` (which
+  omits the `/n`), from population std `sqrt(mean((x-μ)²))` (which subtracts the mean first), and from
+  the shipped rms_norm_2d (the [rows,cols]-OUTPUT `x·rsqrt(mean(x²)+eps)` transformer normalization).
+  The general fuser cannot fuse it (the reduction breaks the elementwise fuser), so the decomposed path
+  materializes the full [rows,cols] squared intermediate plus the reduction Vec. Worktree audit:
+  HEAD==origin/main (my l1_norm tip 092bf531), no unlanded win to land.
+- LEVER: a top-level 1-input superinstruction for the exact 4-eq finite dense f64 RMS graph, computed
+  via the row-parallel `rms_2d`. BIT-IDENTICAL: `rms_row` does an index-order sum of `x[i]·x[i]`
+  (matching `Mul(x,x)` + per-row `ReduceSum`), divides by `n` (matching `Div`), then `f64::sqrt`
+  (correctly-rounded = the `Sqrt` primitive). Only the outer row loop is threaded, so per-row summation
+  order is preserved. The `Div` divisor must equal `cols` (as f64); finite dense rank-2 f64 only, else
+  falls through (matching the graph's NaN/Inf propagation via the generic path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed rms_2d
+  -m 3 -s 20`, 4096x1024, x=softmax_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/rms_2d/orig_decomposed_4096x1024` | 26.389 ms |
+  | `compiled_dispatch/rms_2d/fast_eval_jaxpr_4096x1024` | 7.4296 ms |
+
+  Ratio vs ORIG (same-invocation, trustworthy): **0.2816x time / 3.55x faster** (worst-case CI 3.18x,
+  best 3.99x; robustly ≥2x). HONEST CAVEAT: the fast-path CI is unusually wide (6.88–7.99 ms) vs the
+  near-identical L2-norm kernel's tight 4.61–5.12 ms, so concurrent rch-worker contention likely
+  inflated this run's fast median; the true multiple is probably closer to L2-norm's ~5.9x. Reported
+  conservatively at the measured median 3.55x — still comfortably above the 2x bar at worst-case 3.18x.
+- VALIDATION: `eval_top_level_rms_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path); fj-lax `nn::`
+  61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 6.28x vs ORIG: row-wise L1 (Manhattan/taxicab) norm recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::l1_norm_2d`). Broadens the

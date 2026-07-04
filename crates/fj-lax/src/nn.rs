@@ -906,6 +906,63 @@ pub fn l1_norm_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Row-wise root-mean-square `sqrt(mean(x²))`, bit-identical to the decomposed
+/// `Mul(x,x) → ReduceSum → Div(·, n) → Sqrt` graph: an index-order sum of `x[i]·x[i]`, divided by
+/// `n`, then `f64::sqrt` (IEEE-754 correctly-rounded = the `Sqrt` primitive). Callers guarantee a
+/// non-empty row. Distinct from the L2 norm (no `/n`) and from population std (no mean subtraction).
+fn rms_row(x: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let mut s = 0.0;
+    for &v in x {
+        s += v * v;
+    }
+    (s / n).sqrt()
+}
+
+/// Row-wise root-mean-square along the last axis of a 2D array, one scalar per row
+/// (`sqrt(jax.numpy.mean(x**2, axis=-1))`). ROW-PARALLEL and BIT-IDENTICAL to the decomposed
+/// `Mul(x,x) → ReduceSum(axis=1) → Div(·, n) → Sqrt` graph via [`rms_row`]: index-order sum-of-squares,
+/// `sum/n`, correctly-rounded `f64::sqrt`. Only the outer row loop is threaded (rows independent),
+/// above the `softmax_2d_thread_count` work gate, so per-row summation order is preserved. Used by the
+/// interpreter RMS superinstruction. NOTE: this is the standalone RMS reduction (→[rows]), distinct
+/// from `rms_norm_2d` (the [rows,cols]-output `x·rsqrt(mean(x²)+eps)` transformer normalization).
+#[must_use]
+pub fn rms_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _len = checked_2d_row_major_len("2D rms", x, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = rms_row(&x[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let x_block = &x[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = rms_row(&x_block[start..start + cols]);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
 /// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
 /// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so
