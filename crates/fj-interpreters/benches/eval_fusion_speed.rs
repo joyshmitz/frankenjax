@@ -1201,17 +1201,37 @@ fn run_bf16_row_broadcast() {
     let rows = 1024usize;
     let cols = 1024usize;
     let n = rows * cols;
-    let xb: Vec<u16> = (0..n).map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5)).collect();
-    let yb: Vec<u16> = (0..n).map(|i| bf16_bits_of((i as f64 * 7e-7).sin() + 1.1)).collect();
-    let bias: Vec<u16> = (0..cols).map(|i| bf16_bits_of(i as f64 * 2e-4 - 0.25)).collect();
+    let xb: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5))
+        .collect();
+    let yb: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of((i as f64 * 7e-7).sin() + 1.1))
+        .collect();
+    let bias: Vec<u16> = (0..cols)
+        .map(|i| bf16_bits_of(i as f64 * 2e-4 - 0.25))
+        .collect();
     let t2 = |vals: Vec<u16>| {
         Value::Tensor(
-            TensorValue::new_half_float_values(DType::BF16, Shape { dims: vec![rows as u32, cols as u32] }, vals).unwrap(),
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                vals,
+            )
+            .unwrap(),
         )
     };
     let row = |vals: Vec<u16>| {
         Value::Tensor(
-            TensorValue::new_half_float_values(DType::BF16, Shape { dims: vec![cols as u32] }, vals).unwrap(),
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: vec![cols as u32],
+                },
+                vals,
+            )
+            .unwrap(),
         )
     };
     let xv = VarId(0);
@@ -1219,18 +1239,43 @@ fn run_bf16_row_broadcast() {
     let yv = VarId(2);
     let v: Vec<VarId> = (3..=10).map(VarId).collect();
     let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
-        primitive: p, inputs: ins, outputs: smallvec![o], params: BTreeMap::new(), sub_jaxprs: vec![], effects: vec![],
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
     };
     let lit = |c: f64| Atom::Lit(Literal::from_bf16_f64(c));
     let eqns = vec![
-        mk(Primitive::Add, smallvec![Atom::Var(xv), Atom::Var(bv)], v[0]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(xv), Atom::Var(bv)],
+            v[0],
+        ),
         mk(Primitive::Mul, smallvec![Atom::Var(v[0]), lit(1.25)], v[1]),
-        mk(Primitive::Sub, smallvec![Atom::Var(v[1]), Atom::Var(bv)], v[2]),
-        mk(Primitive::Mul, smallvec![Atom::Var(v[2]), Atom::Var(yv)], v[3]),
-        mk(Primitive::Add, smallvec![Atom::Var(v[3]), Atom::Var(bv)], v[4]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(bv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[3]), Atom::Var(bv)],
+            v[4],
+        ),
         mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit(0.5)], v[5]),
         mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
-        mk(Primitive::Add, smallvec![Atom::Var(v[6]), Atom::Var(bv)], v[7]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(bv)],
+            v[7],
+        ),
     ];
     let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns.clone());
     let args = [t2(xb.clone()), row(bias.clone()), t2(yb.clone())];
@@ -1240,10 +1285,14 @@ fn run_bf16_row_broadcast() {
         env[1] = Some(args[1].clone());
         env[2] = Some(args[2].clone());
         for eqn in &eqns {
-            let ins: Vec<Value> = eqn.inputs.iter().map(|a| match a {
-                Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
-                Atom::Lit(l) => Value::Scalar(*l),
-            }).collect();
+            let ins: Vec<Value> = eqn
+                .inputs
+                .iter()
+                .map(|a| match a {
+                    Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
+                    Atom::Lit(l) => Value::Scalar(*l),
+                })
+                .collect();
             let out = eval_primitive(eqn.primitive, &ins, &eqn.params).unwrap();
             env[eqn.outputs[0].0 as usize] = Some(out);
         }
@@ -1253,21 +1302,31 @@ fn run_bf16_row_broadcast() {
     let u = unfused();
     if let (Value::Tensor(ft), Value::Tensor(ut)) = (&f[0], &u) {
         for idx in [0, cols - 1, n / 2, n - 1] {
-            assert_eq!(half_bits_at(ft, idx), half_bits_at(ut, idx), "fused bf16 row-broadcast != unfused");
+            assert_eq!(
+                half_bits_at(ft, idx),
+                half_bits_at(ut, idx),
+                "fused bf16 row-broadcast != unfused"
+            );
         }
     }
     let iters = 50;
     let _ = eval_jaxpr(&jaxpr, &args).unwrap();
     let t0 = Instant::now();
-    for _ in 0..iters { std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap()); }
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
     let fused = t0.elapsed().as_nanos() as f64 / iters as f64;
     let _ = unfused();
     let t1 = Instant::now();
-    for _ in 0..iters { std::hint::black_box(unfused()); }
+    for _ in 0..iters {
+        std::hint::black_box(unfused());
+    }
     let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
     println!(
         "EVAL_FUSION_SPEED_BF16_ROW_BROADCAST rows={rows} cols={cols} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
-        unf / 1e6, fused / 1e6, unf / fused,
+        unf / 1e6,
+        fused / 1e6,
+        unf / fused,
     );
 }
 
@@ -1280,28 +1339,69 @@ fn run_i64_row_broadcast() {
     let yi: Vec<i64> = (0..n).map(|i| (i as i64 % 97) + 1).collect();
     let bias: Vec<i64> = (0..cols).map(|i| i as i64 - 128).collect();
     let t2 = |vals: Vec<i64>| {
-        Value::Tensor(TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, vals).unwrap())
+        Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                vals,
+            )
+            .unwrap(),
+        )
     };
     let row = |vals: Vec<i64>| {
-        Value::Tensor(TensorValue::new_i64_values(Shape { dims: vec![cols as u32] }, vals).unwrap())
+        Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![cols as u32],
+                },
+                vals,
+            )
+            .unwrap(),
+        )
     };
     let xv = VarId(0);
     let bv = VarId(1);
     let yv = VarId(2);
     let v: Vec<VarId> = (3..=10).map(VarId).collect();
     let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
-        primitive: p, inputs: ins, outputs: smallvec![o], params: BTreeMap::new(), sub_jaxprs: vec![], effects: vec![],
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
     };
     let lit = |c: i64| Atom::Lit(Literal::I64(c));
     let eqns = vec![
-        mk(Primitive::Add, smallvec![Atom::Var(xv), Atom::Var(bv)], v[0]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(xv), Atom::Var(bv)],
+            v[0],
+        ),
         mk(Primitive::Mul, smallvec![Atom::Var(v[0]), lit(3)], v[1]),
-        mk(Primitive::Sub, smallvec![Atom::Var(v[1]), Atom::Var(bv)], v[2]),
-        mk(Primitive::Mul, smallvec![Atom::Var(v[2]), Atom::Var(yv)], v[3]),
-        mk(Primitive::Add, smallvec![Atom::Var(v[3]), Atom::Var(bv)], v[4]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(bv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[3]), Atom::Var(bv)],
+            v[4],
+        ),
         mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit(5)], v[5]),
         mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2)], v[6]),
-        mk(Primitive::Add, smallvec![Atom::Var(v[6]), Atom::Var(bv)], v[7]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(bv)],
+            v[7],
+        ),
     ];
     let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns.clone());
     let args = [t2(xi.clone()), row(bias.clone()), t2(yi.clone())];
@@ -1311,10 +1411,14 @@ fn run_i64_row_broadcast() {
         env[1] = Some(args[1].clone());
         env[2] = Some(args[2].clone());
         for eqn in &eqns {
-            let ins: Vec<Value> = eqn.inputs.iter().map(|a| match a {
-                Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
-                Atom::Lit(l) => Value::Scalar(*l),
-            }).collect();
+            let ins: Vec<Value> = eqn
+                .inputs
+                .iter()
+                .map(|a| match a {
+                    Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
+                    Atom::Lit(l) => Value::Scalar(*l),
+                })
+                .collect();
             let out = eval_primitive(eqn.primitive, &ins, &eqn.params).unwrap();
             env[eqn.outputs[0].0 as usize] = Some(out);
         }
@@ -1334,15 +1438,21 @@ fn run_i64_row_broadcast() {
     let iters = 50;
     let _ = eval_jaxpr(&jaxpr, &args).unwrap();
     let t0 = Instant::now();
-    for _ in 0..iters { std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap()); }
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
     let fused = t0.elapsed().as_nanos() as f64 / iters as f64;
     let _ = unfused();
     let t1 = Instant::now();
-    for _ in 0..iters { std::hint::black_box(unfused()); }
+    for _ in 0..iters {
+        std::hint::black_box(unfused());
+    }
     let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
     println!(
         "EVAL_FUSION_SPEED_I64_ROW_BROADCAST rows={rows} cols={cols} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
-        unf / 1e6, fused / 1e6, unf / fused,
+        unf / 1e6,
+        fused / 1e6,
+        unf / fused,
     );
 }
 
@@ -1596,7 +1706,11 @@ fn run_f32_thread_ab(n: usize) {
     let to = eval_jaxpr(&jaxpr, &args).unwrap();
     if let (Value::Tensor(s), Value::Tensor(t)) = (&so[0], &to[0]) {
         for idx in [0, n / 2, n - 1] {
-            assert_eq!(f32_bits_at(s, idx), f32_bits_at(t, idx), "serial != threaded f32");
+            assert_eq!(
+                f32_bits_at(s, idx),
+                f32_bits_at(t, idx),
+                "serial != threaded f32"
+            );
         }
     }
     let iters = if n >= (1 << 23) { 30 } else { 80 };
@@ -1890,7 +2004,11 @@ fn run_fusion_dynamic_probe(n: usize) {
     let a = step_major();
     let b = elem_major();
     for idx in [0, n / 2, n - 1] {
-        assert_eq!(a[idx].to_bits(), b[idx].to_bits(), "dyn step != elem at {idx}");
+        assert_eq!(
+            a[idx].to_bits(),
+            b[idx].to_bits(),
+            "dyn step != elem at {idx}"
+        );
     }
     let iters = if n >= (1 << 23) { 30 } else { 80 };
     let _ = std::hint::black_box(step_major());
