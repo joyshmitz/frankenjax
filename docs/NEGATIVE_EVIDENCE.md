@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 9.59x vs ORIG: row-wise cosine similarity recognized as a fused (row-parallel) 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::cosine_similarity_2d`).
+  Confirms the transcendental-free-reduction vein flagged after var_2d: cosine similarity =
+  `Σ(a·b) / (√Σa² · √Σb²)` along the last axis, the ubiquitous embedding/retrieval metric. A TWO-input,
+  10-equation graph `Mul(a,b) → ReduceSum(dot) | Mul(a,a) → ReduceSum → Sqrt(‖a‖) | Mul(b,b) →
+  ReduceSum → Sqrt(‖b‖) | Mul(denom) → Div(dot, denom)`, f64 [rows,cols]×2 → [rows] (rank-reducing).
+  NO transcendentals (`Sqrt` = `f64::sqrt`, IEEE-exact). The general fuser cannot fuse it (three
+  reductions break the elementwise fuser), so the decomposed path materializes THREE full [rows,cols]
+  intermediates (a·b, a², b²) plus per-reduction Vecs. Worktree audit: HEAD==origin/main, no unlanded
+  win.
+- LEVER: a top-level 2-input superinstruction for the exact 10-eq finite dense f64 cosine graph,
+  computed via the row-parallel `cosine_similarity_2d`. BIT-IDENTICAL: `cosine_similarity_row`
+  accumulates dot/‖a‖²/‖b‖² as THREE INDEPENDENT index-order sums in one pass (each accumulator is its
+  own left-fold → identical to three separate `ReduceSum`s), then `dot / (sum_a2.sqrt() *
+  sum_b2.sqrt())` — matching the graph's `Sqrt`/`Mul(denom)`/`Div` grouping (Div numerator = dot
+  enforced; the two dot/denom `Mul`s are commutative → operand order accepted either way). Zero-norm
+  rows propagate inf/NaN exactly as the graph does. Finite dense rank-2 f64 only, else falls through.
+- KEY (2nd-biggest of the session, 9.59x): as with var_2d, the fused kernel has NO transcendental so
+  it is pure bandwidth + cheap FLOPs + 2 sqrt → **7.59 ms** (row-parallel), while the decomposed path
+  pays full dispatch to materialize three [rows,cols] matrices + three reductions → 72.8 ms.
+  Transcendental-free multi-reduction graphs give the largest multiples.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed cosine -m 3 -s 20`,
+  4096x1024, a=softmax_input / b=layer_norm_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/cosine_similarity_2d/orig_decomposed_4096x1024` | 72.847 ms |
+  | `compiled_dispatch/cosine_similarity_2d/fast_eval_jaxpr_4096x1024` | 7.5947 ms |
+
+  Ratio vs ORIG: **0.104x time / 9.59x faster** (worst-case CI 8.41x, best 11.01x; robustly ≥2x).
+- VALIDATION: `eval_top_level_cosine_similarity_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on random f64; nonfinite falls through); fj-lax `nn::` GREEN (exit=0);
+  all 15 superinstruction parity tests GREEN. Pre-existing INDEPENDENT RED (NOT this change):
+  fj-interpreters `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff
+  touches no cbrt/arena code.
+
 ## 2026-07-04 - WIN 13.38x vs ORIG: row-wise population variance recognized as a fused (row-parallel) interpreter superinstruction — BIGGEST of the session (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::variance_2d`). A genuine

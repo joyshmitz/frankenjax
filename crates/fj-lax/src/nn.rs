@@ -464,6 +464,71 @@ pub fn variance_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
+/// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
+/// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so
+/// fusing them into one pass matches three separate `ReduceSum`s bit-for-bit; `Sqrt` is `f64::sqrt`
+/// (IEEE-exact, same as the `Sqrt` primitive). Zero norms propagate inf/NaN exactly as the graph does.
+fn cosine_similarity_row(a: &[f64], b: &[f64]) -> f64 {
+    let mut dot = 0.0;
+    let mut sum_a2 = 0.0;
+    let mut sum_b2 = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        dot += av * bv;
+        sum_a2 += av * av;
+        sum_b2 += bv * bv;
+    }
+    dot / (sum_a2.sqrt() * sum_b2.sqrt())
+}
+
+/// Cosine similarity along the last axis of two 2D arrays, one scalar per row
+/// (`Σ(a·b) / (‖a‖·‖b‖)`, the ubiquitous embedding/retrieval metric). ROW-PARALLEL and
+/// BIT-IDENTICAL to the decomposed dot/norm/norm/Div graph (index-order reductions via
+/// [`cosine_similarity_row`]); rows are independent so only the outer loop is threaded, above the
+/// `softmax_2d_thread_count` work gate. Used by the interpreter cosine-similarity superinstruction.
+/// Callers guarantee `a` and `b` share the same `rows,cols` layout.
+#[must_use]
+pub fn cosine_similarity_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D cosine_similarity a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D cosine_similarity b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = cosine_similarity_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = cosine_similarity_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
 ///
 /// Matches `jax.nn.softmax(x)` for a 1D array.

@@ -1129,6 +1129,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_cosine_similarity_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_gelu_erf_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -2166,6 +2170,148 @@ fn try_eval_top_level_var_2d_f64(
     }
 
     let output = fj_lax::nn::variance_2d(values, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise cosine similarity
+/// `Σ(a·b) / (√Σa² · √Σb²)` along the last axis (the ubiquitous embedding/retrieval metric): the
+/// 10-equation, TWO-input graph `Mul(a,b) → ReduceSum(dot) | Mul(a,a) → ReduceSum → Sqrt(‖a‖) |
+/// Mul(b,b) → ReduceSum → Sqrt(‖b‖) | Mul(denom) → Div(dot, denom)`. Two f64 [rows,cols] inputs, one
+/// [rows] output (rank-reducing). NO transcendentals (Sqrt is IEEE-exact) — the fused kernel is pure
+/// bandwidth + cheap FLOPs, so like `var_2d` this yields a large multiple. The general fuser cannot
+/// fuse it (three reductions break the elementwise fuser), so the decomposed path materializes three
+/// full [rows,cols] intermediates (a·b, a², b²) plus per-reduction Vecs. Fused via the row-parallel
+/// `cosine_similarity_2d`, whose independent index-order dot/‖a‖²/‖b‖² sums match the graph bit-for-
+/// bit; finite dense rank-2 f64 only, else falls through.
+fn try_eval_top_level_cosine_similarity_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 10
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let a = jaxpr.invars[0];
+    let b = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [
+        ab_eq,
+        dot_eq,
+        a2_eq,
+        sa_eq,
+        na_eq,
+        b2_eq,
+        sb_eq,
+        nb_eq,
+        denom_eq,
+        div_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    // dot = ReduceSum(a * b) (Mul commutative → either operand order)
+    let ab = single_output_for_primitive(ab_eq, Primitive::Mul)?;
+    let ab_ok = matches!(
+        ab_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)] if (*x == a && *y == b) || (*x == b && *y == a)
+    );
+    if !ab_ok {
+        return None;
+    }
+    let dot = single_output_for_param_primitive(dot_eq, Primitive::ReduceSum)?;
+    if dot_eq.inputs.as_slice() != [Atom::Var(ab)] || !axis1_reduce_params(&dot_eq.params) {
+        return None;
+    }
+
+    // ‖a‖ = Sqrt(ReduceSum(a * a))
+    let a2 = single_output_for_primitive(a2_eq, Primitive::Mul)?;
+    if a2_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(a)] {
+        return None;
+    }
+    let sa = single_output_for_param_primitive(sa_eq, Primitive::ReduceSum)?;
+    if sa_eq.inputs.as_slice() != [Atom::Var(a2)] || !axis1_reduce_params(&sa_eq.params) {
+        return None;
+    }
+    let na = single_output_for_primitive(na_eq, Primitive::Sqrt)?;
+    if na_eq.inputs.as_slice() != [Atom::Var(sa)] {
+        return None;
+    }
+
+    // ‖b‖ = Sqrt(ReduceSum(b * b))
+    let b2 = single_output_for_primitive(b2_eq, Primitive::Mul)?;
+    if b2_eq.inputs.as_slice() != [Atom::Var(b), Atom::Var(b)] {
+        return None;
+    }
+    let sb = single_output_for_param_primitive(sb_eq, Primitive::ReduceSum)?;
+    if sb_eq.inputs.as_slice() != [Atom::Var(b2)] || !axis1_reduce_params(&sb_eq.params) {
+        return None;
+    }
+    let nb = single_output_for_primitive(nb_eq, Primitive::Sqrt)?;
+    if nb_eq.inputs.as_slice() != [Atom::Var(sb)] {
+        return None;
+    }
+
+    // denom = ‖a‖ · ‖b‖ (Mul commutative → either order)
+    let denom = single_output_for_primitive(denom_eq, Primitive::Mul)?;
+    let denom_ok = matches!(
+        denom_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)] if (*x == na && *y == nb) || (*x == nb && *y == na)
+    );
+    if !denom_ok {
+        return None;
+    }
+    // out = dot / denom (Div non-commutative → numerator = dot)
+    let quotient = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if quotient != out || div_eq.inputs.as_slice() != [Atom::Var(dot), Atom::Var(denom)] {
+        return None;
+    }
+
+    let Value::Tensor(a_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(b_t) = &args[1] else {
+        return None;
+    };
+    if a_t.dtype != DType::F64
+        || b_t.dtype != DType::F64
+        || a_t.shape.dims.len() != 2
+        || b_t.shape.dims != a_t.shape.dims
+    {
+        return None;
+    }
+    let rows = a_t.shape.dims[0] as usize;
+    let cols = a_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let a_v = a_t.elements.as_f64_slice()?;
+    let b_v = b_t.elements.as_f64_slice()?;
+    if !a_v.iter().all(|value| value.is_finite()) || !b_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::cosine_similarity_2d(a_v, b_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -20509,6 +20655,113 @@ mod tests {
             .expect("nonfinite rms norm falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite rms norm");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_cosine_similarity_2d_jaxpr() -> Jaxpr {
+        let a = VarId(1);
+        let b = VarId(2);
+        let ab = VarId(3);
+        let dot = VarId(4);
+        let a2 = VarId(5);
+        let sa = VarId(6);
+        let na = VarId(7);
+        let b2 = VarId(8);
+        let sb = VarId(9);
+        let nb = VarId(10);
+        let denom = VarId(11);
+        let out = VarId(12);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        let mul = |lhs: VarId, rhs: VarId, o: VarId| Equation {
+            primitive: Primitive::Mul,
+            inputs: smallvec![Atom::Var(lhs), Atom::Var(rhs)],
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let reduce = |input: VarId, o: VarId| Equation {
+            primitive: Primitive::ReduceSum,
+            inputs: smallvec![Atom::Var(input)],
+            outputs: smallvec![o],
+            params: reduce_axis1.clone(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let sqrt = |input: VarId, o: VarId| Equation {
+            primitive: Primitive::Sqrt,
+            inputs: smallvec![Atom::Var(input)],
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![
+                mul(a, b, ab),
+                reduce(ab, dot),
+                mul(a, a, a2),
+                reduce(a2, sa),
+                sqrt(sa, na),
+                mul(b, b, b2),
+                reduce(b2, sb),
+                sqrt(sb, nb),
+                mul(na, nb, denom),
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(dot), Atom::Var(denom)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_cosine_similarity_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let a_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.37).sin() * 3.0 + 0.5)
+            .collect();
+        let b_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.21).cos() * 2.0 - 0.75)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let a = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_data).expect("a input"),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, b_data).expect("b input"),
+        );
+        let jaxpr = make_cosine_similarity_2d_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, &[a.clone(), b.clone()]).expect("fast cosine");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[a, b]).expect("generic cosine");
+        assert_eq!(fast, generic);
+
+        let mut a_nonfinite: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01 + 0.1).collect();
+        a_nonfinite[cols + 1] = f64::NAN;
+        let a_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_nonfinite)
+                .expect("nonfinite a"),
+        );
+        let b_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols).map(|idx| idx as f64 * 0.02 + 0.3).collect(),
+            )
+            .expect("finite b"),
+        );
+        let through_eval =
+            eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()]).expect("nonfinite cosine falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite cosine");
         assert_eq!(through_eval, through_generic);
     }
 
