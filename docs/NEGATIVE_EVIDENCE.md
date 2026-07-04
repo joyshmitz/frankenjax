@@ -2,6 +2,46 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 15.43x vs ORIG: row-wise population kurtosis recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::kurtosis_2d`). Fourth rung of
+  the transcendental-FREE statistical-moment lane (variance 13.38x → std 13.79x → skewness 10.40x →
+  kurtosis), and the LARGEST 1-input moment win: row-wise population kurtosis `g2 = m4 / m2²`
+  (`scipy.stats.kurtosis(x, axis=-1, fisher=False)`, Pearson β₂, `ddof=0`) with `m2 = mean((x-μ)²)`,
+  `m4 = mean((x-μ)⁴)` — the fourth standardized moment. A 12-equation 1-input graph `ReduceSum →
+  Div(mean) → BroadcastInDim → Sub → Mul(d²) → Mul(d⁴) → ReduceSum → Div(m2) → ReduceSum → Div(m4) →
+  Mul(denom) → Div`, f64 [rows,cols] → [rows] (rank-reducing). NO transcendentals AT ALL — pure
+  add/sub/mul/div (the `m2²` denominator is `Mul(m2,m2)`, and `d⁴` is `Mul(d2,d2)` so there is not even
+  a Sqrt), which is why it lands the biggest 1-input moment multiple. The general fuser cannot fuse it
+  (the three reductions break the elementwise fuser), so the decomposed path materializes the full
+  [rows,cols] centered / squared / fourth-power intermediates plus three per-reduction Vecs. Worktree
+  audit: HEAD==origin/main (my skewness tip 8faf09c8), no unlanded win to land.
+- LEVER: a top-level 1-input superinstruction for the exact 12-eq finite dense f64 kurtosis graph,
+  computed via the row-parallel `kurtosis_2d`. BIT-IDENTICAL: `kurtosis_row` does an index-order sum
+  for the mean, then a single index-order pass accumulating `d² = (x-μ)²` and `d⁴ = (x-μ)²·(x-μ)²` —
+  the exact `Mul(d,d)` then `Mul(d2,d2)` products the graph forms — each `/n`, then `denom = m2·m2`
+  and `m4/denom`. Reuses the moment-family shape/divisor guards (all THREE `Div` divisors must equal
+  `cols` as f64, broadcast restores `rows,cols`); finite dense rank-2 f64 only, else falls through
+  (matching the graph's NaN/Inf propagation via the generic path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed kurtosis_2d
+  -m 3 -s 20`, 4096x1024, x=softmax_input; VERY TIGHT CIs → low variance):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/kurtosis_2d/orig_decomposed_4096x1024` | 56.207 ms |
+  | `compiled_dispatch/kurtosis_2d/fast_eval_jaxpr_4096x1024` | 3.6430 ms |
+
+  Ratio vs ORIG: **0.0648x time / 15.43x faster** (worst-case CI 15.15x, best 15.73x; robustly ≥2x).
+  Biggest 1-input moment multiple (> variance 13.38x / std 13.79x): the fully transcendental-free
+  fused kernel (`d²`/`d⁴` + two accumulators, no sqrt) is a very tight 3.64 ms while the decomposed
+  path re-materializes three [rows,cols] moment intermediates.
+- VALIDATION: `eval_top_level_kurtosis_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path); fj-lax `nn::`
+  61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 10.40x vs ORIG: row-wise population skewness recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::skewness_2d`). Third rung of

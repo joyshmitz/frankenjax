@@ -588,6 +588,78 @@ pub fn skewness_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Population kurtosis (non-excess, Pearson β₂) of a single row, `m4 / m2²` with `m2 = mean((x-μ)²)`,
+/// `m4 = mean((x-μ)⁴)`, bit-identical to the decomposed graph: one index-order pass for the mean,
+/// then one index-order pass accumulating `d² = (x-μ)²` and `d⁴ = (x-μ)²·(x-μ)²` (the exact
+/// `Mul(d,d)` then `Mul(d2,d2)` products the graph forms), both divided by `n`, with the denominator
+/// built as `m2 · m2` (= `m2²`). NO transcendentals at all — pure add/sub/mul/div. Callers guarantee
+/// a non-empty row.
+fn kurtosis_row(row: &[f64]) -> f64 {
+    let n = row.len() as f64;
+    let mut sum = 0.0;
+    for &v in row {
+        sum += v;
+    }
+    let mean = sum / n;
+    let mut sum2 = 0.0;
+    let mut sum4 = 0.0;
+    for &v in row {
+        let d = v - mean;
+        let d2 = d * d;
+        let d4 = d2 * d2;
+        sum2 += d2;
+        sum4 += d4;
+    }
+    let m2 = sum2 / n;
+    let m4 = sum4 / n;
+    let denom = m2 * m2;
+    m4 / denom
+}
+
+/// Population kurtosis (non-excess, Pearson β₂, `ddof=0`) along the last axis of a 2D array, one
+/// scalar per row (`scipy.stats.kurtosis(x, axis=-1, fisher=False)`). ROW-PARALLEL and BIT-IDENTICAL
+/// to the decomposed graph `ReduceSum → Div(mean) → BroadcastInDim → Sub → Mul(d²) → Mul(d⁴) →
+/// ReduceSum → Div(m2) → ReduceSum → Div(m4) → Mul(denom) → Div`: same index-order reductions +
+/// `sum/n` moment grouping via [`kurtosis_row`], denominator `m2·m2`. Rows are independent so only
+/// the outer loop is threaded, above the `softmax_2d_thread_count` work gate. Used by the interpreter
+/// kurtosis superinstruction.
+#[must_use]
+pub fn kurtosis_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _len = checked_2d_row_major_len("2D kurtosis", x, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = kurtosis_row(&x[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let x_block = &x[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = kurtosis_row(&x_block[start..start + cols]);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Cosine similarity of a single pair of rows, `Σ(a·b) / (√Σa² · √Σb²)`, bit-identical to the
 /// decomposed `Mul → ReduceSum(dot) | Mul → ReduceSum(‖a‖²) → Sqrt | Mul → ReduceSum(‖b‖²) → Sqrt |
 /// Mul(denom) → Div` graph. The three dot/‖a‖²/‖b‖² accumulators are INDEPENDENT index-order sums, so

@@ -1282,6 +1282,131 @@ fn build_skewness_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     )
 }
 
+fn build_kurtosis_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+    let x = VarId(1);
+    let s1 = VarId(2);
+    let mean = VarId(3);
+    let mean_b = VarId(4);
+    let d = VarId(5);
+    let d2 = VarId(6);
+    let d4 = VarId(7);
+    let sum2 = VarId(8);
+    let m2 = VarId(9);
+    let sum4 = VarId(10);
+    let m4 = VarId(11);
+    let denom = VarId(12);
+    let out = VarId(13);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let n = Literal::from_f64(cols as f64);
+    Jaxpr::new(
+        vec![x],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(x)],
+                outputs: smallvec::smallvec![s1],
+                params: reduce_axis1.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(s1), Atom::Lit(n)],
+                outputs: smallvec::smallvec![mean],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::BroadcastInDim,
+                inputs: smallvec::smallvec![Atom::Var(mean)],
+                outputs: smallvec::smallvec![mean_b],
+                params: bcast,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Var(mean_b)],
+                outputs: smallvec::smallvec![d],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(d), Atom::Var(d)],
+                outputs: smallvec::smallvec![d2],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(d2), Atom::Var(d2)],
+                outputs: smallvec::smallvec![d4],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(d2)],
+                outputs: smallvec::smallvec![sum2],
+                params: reduce_axis1.clone(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(sum2), Atom::Lit(n)],
+                outputs: smallvec::smallvec![m2],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(d4)],
+                outputs: smallvec::smallvec![sum4],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(sum4), Atom::Lit(n)],
+                outputs: smallvec::smallvec![m4],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(m2), Atom::Var(m2)],
+                outputs: smallvec::smallvec![denom],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(m4), Atom::Var(denom)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_logsumexp_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let x = VarId(1);
     let max = VarId(2);
@@ -2020,6 +2145,36 @@ fn eval_skewness_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value
     eval_primitive(Primitive::Div, &[m3, denom], &empty).expect("skewness")
 }
 
+fn eval_kurtosis_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let bcast = BTreeMap::from([
+        ("shape".to_owned(), format!("{rows},{cols}")),
+        ("broadcast_dimensions".to_owned(), "0".to_owned()),
+    ]);
+    let empty = BTreeMap::new();
+    let n = Value::scalar_f64(cols as f64);
+    let s1 = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(input),
+        &reduce_axis1,
+    )
+    .expect("reduce sum");
+    let mean = eval_primitive(Primitive::Div, &[s1, n.clone()], &empty).expect("mean");
+    let mean_b =
+        eval_primitive(Primitive::BroadcastInDim, &[mean], &bcast).expect("broadcast mean");
+    let d = eval_primitive(Primitive::Sub, &[input.clone(), mean_b], &empty).expect("center");
+    let d2 = eval_primitive(Primitive::Mul, &[d.clone(), d], &empty).expect("square");
+    let d4 = eval_primitive(Primitive::Mul, &[d2.clone(), d2.clone()], &empty).expect("fourth");
+    let sum2 = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&d2), &reduce_axis1)
+        .expect("reduce sum sq");
+    let m2 = eval_primitive(Primitive::Div, &[sum2, n.clone()], &empty).expect("m2");
+    let sum4 = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&d4), &reduce_axis1)
+        .expect("reduce sum fourth");
+    let m4 = eval_primitive(Primitive::Div, &[sum4, n], &empty).expect("m4");
+    let denom = eval_primitive(Primitive::Mul, &[m2.clone(), m2], &empty).expect("denom");
+    eval_primitive(Primitive::Div, &[m4, denom], &empty).expect("kurtosis")
+}
+
 fn eval_logsumexp_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let bcast = BTreeMap::from([
@@ -2689,6 +2844,24 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 eval_jaxpr(black_box(&skewness_jaxpr), std::slice::from_ref(&softmax_input))
+                    .unwrap(),
+            )
+        })
+    });
+    let kurtosis_jaxpr = build_kurtosis_2d_jaxpr(rows, cols);
+    group.bench_function("kurtosis_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_kurtosis_2d_decomposed(
+                black_box(&softmax_input),
+                rows,
+                cols,
+            ))
+        })
+    });
+    group.bench_function("kurtosis_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(black_box(&kurtosis_jaxpr), std::slice::from_ref(&softmax_input))
                     .unwrap(),
             )
         })
