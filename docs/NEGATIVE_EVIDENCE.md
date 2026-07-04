@@ -2,6 +2,38 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 7.74x vs ORIG: row-wise chi-squared distance recognized as a fused 2-input interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::chi_squared_distance_2d`).
+  Chi-squared distance `Σ (a-b)² / (a+b)` along the last axis (the histogram / feature-matching χ² distance
+  used in computer vision / bag-of-words; `sklearn`'s `additive_chi2_kernel` is its negation). A 5-equation,
+  TWO-input graph `Sub(a,b) → Mul(square) | Add(a,b) | Div → ReduceSum(axis=1)`, two f64 [rows,cols] inputs
+  → one [rows] output (rank-reducing). Worktree audit: HEAD==origin/main (`390d7b82`, DustyDog's docs-only
+  commits re-recording the convergent explained-variance measurement — no code change), no unlanded win → DIG
+  turn. DISTINCT from `euclidean_distance_2d` / `mean_squared_error_2d`: the per-element `(a+b)` DIVISOR is
+  what makes χ² its own metric (weights each squared difference by the bin total). TRANSCENDENTAL-FREE.
+- LEVER: a top-level 2-input superinstruction for the exact 5-eq finite dense f64 χ² graph, computed via the
+  row-parallel `chi_squared_distance_2d`. BIT-IDENTICAL: `chi_squared_distance_row` recomputes each
+  per-element term `(a[i]-b[i])` (Sub), squares it (Mul), forms `(a[i]+b[i])` (Add), divides (TRUE Div), and
+  accumulates index-order (matching `ReduceSum` over the materialized `Div` tensor). Both inputs must be dense
+  finite rank-2 f64 of EQUAL shape, else falls through to the generic path (an element with `a+b == 0` gives
+  `0/0` NaN via EITHER path).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed chi_squared_distance_2d
+  -m 3 -s 20`, 4096x1024, a=softmax_input b=layer_norm_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/chi_squared_distance_2d/orig_decomposed_4096x1024` | 58.541 ms |
+  | `compiled_dispatch/chi_squared_distance_2d/fast_eval_jaxpr_4096x1024` | 7.567 ms |
+
+  Ratio vs ORIG: **0.1293x time / 7.74x faster** (fast-path CI widened by rch worker contention 6.49–8.57 ms; worst-case CI 6.78x, best 9.08x; robustly ≥2x). The decomposed baseline materializes 4
+  [rows,cols] intermediates (diff, squared, sum, ratio) + a reduction; the fused path is one pass.
+- VALIDATION: `eval_top_level_chi_squared_distance_2d_f64_matches_generic_and_preserves_edges` GREEN
+  (fused==generic bit-for-bit on strictly-positive random f64; nonfinite falls through); fj-lax `nn::` GREEN.
+  Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)`.
+
 ## 2026-07-04 - WIN 12.90x vs ORIG: row-wise explained variance as a fused interpreter superinstruction (DustyDog)
 
 - Agent: DustyDog. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::explained_variance_score_2d`).

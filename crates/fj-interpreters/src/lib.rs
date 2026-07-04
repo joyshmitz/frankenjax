@@ -1186,6 +1186,11 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_chi_squared_distance_2d_f64(jaxpr, const_values, args)
+    {
+        return result;
+    }
+
     if let Some(result) =
         try_eval_top_level_root_mean_squared_error_2d_f64(jaxpr, const_values, args)
     {
@@ -3886,6 +3891,101 @@ fn try_eval_top_level_mean_absolute_error_2d_f64(
     }
 
     let output = fj_lax::nn::mean_absolute_error_2d(a_v, b_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise chi-squared distance `Σ (a-b)² / (a+b)` along the last
+/// axis (the histogram / feature-matching χ² distance; `sklearn`'s `additive_chi2_kernel` is its
+/// negation): a 5-equation, TWO-input graph `Sub(a,b) → Mul(square) | Add(a,b) | Div → ReduceSum(axis=1)`,
+/// two f64 [rows,cols] inputs → one [rows] output (rank-reducing). Computed via the row-parallel
+/// [`fj_lax::nn::chi_squared_distance_2d`], which fuses the per-element `(a-b)²/(a+b)` term and the
+/// index-order sum into one pass. DISTINCT from `euclidean_distance_2d` / `mean_squared_error_2d` (no
+/// per-element `(a+b)` divisor). Falls through unless both inputs are dense finite rank-2 f64 of equal
+/// shape.
+fn try_eval_top_level_chi_squared_distance_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 5
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let a = jaxpr.invars[0];
+    let b = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [diff_eq, sq_eq, sum_eq, div_eq, reduce_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    let diff = single_output_for_primitive(diff_eq, Primitive::Sub)?;
+    if diff_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(b)] {
+        return None;
+    }
+    let sq = single_output_for_primitive(sq_eq, Primitive::Mul)?;
+    if sq_eq.inputs.as_slice() != [Atom::Var(diff), Atom::Var(diff)] {
+        return None;
+    }
+    let sum_ab = single_output_for_primitive(sum_eq, Primitive::Add)?;
+    if sum_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(b)] {
+        return None;
+    }
+    let ratio = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if div_eq.inputs.as_slice() != [Atom::Var(sq), Atom::Var(sum_ab)] {
+        return None;
+    }
+    let reduced = single_output_for_param_primitive(reduce_eq, Primitive::ReduceSum)?;
+    if reduced != out
+        || reduce_eq.inputs.as_slice() != [Atom::Var(ratio)]
+        || !axis1_reduce_params(&reduce_eq.params)
+    {
+        return None;
+    }
+
+    let Value::Tensor(a_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(b_t) = &args[1] else {
+        return None;
+    };
+    if a_t.dtype != DType::F64
+        || b_t.dtype != DType::F64
+        || a_t.shape.dims.len() != 2
+        || b_t.shape.dims != a_t.shape.dims
+    {
+        return None;
+    }
+    let rows = a_t.shape.dims[0] as usize;
+    let cols = a_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let a_v = a_t.elements.as_f64_slice()?;
+    let b_v = b_t.elements.as_f64_slice()?;
+    if !a_v.iter().all(|value| value.is_finite()) || !b_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::chi_squared_distance_2d(a_v, b_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -23438,6 +23538,112 @@ mod tests {
             eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()]).expect("nonfinite mae falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite mae");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_chi_squared_distance_2d_jaxpr() -> Jaxpr {
+        let a = VarId(1);
+        let b = VarId(2);
+        let diff = VarId(3);
+        let sq = VarId(4);
+        let sum_ab = VarId(5);
+        let ratio = VarId(6);
+        let out = VarId(7);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+                    outputs: smallvec![diff],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(diff), Atom::Var(diff)],
+                    outputs: smallvec![sq],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+                    outputs: smallvec![sum_ab],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(sq), Atom::Var(sum_ab)],
+                    outputs: smallvec![ratio],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(ratio)],
+                    outputs: smallvec![out],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_chi_squared_distance_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        // Strictly-positive inputs so a+b never hits 0 (would give 0/0 NaN via either path).
+        let a_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.37).sin() * 1.5 + 3.0)
+            .collect();
+        let b_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.19).cos() * 1.2 + 2.5)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let a = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_data).expect("a input"),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, b_data).expect("b input"),
+        );
+        let jaxpr = make_chi_squared_distance_2d_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, &[a.clone(), b.clone()]).expect("fast chi2");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[a, b]).expect("generic chi2");
+        assert_eq!(fast, generic);
+
+        let mut a_nonfinite: Vec<f64> = (0..rows * cols)
+            .map(|idx| idx as f64 * 0.02 + 1.0)
+            .collect();
+        a_nonfinite[cols + 1] = f64::NAN;
+        let a_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_nonfinite)
+                .expect("nonfinite a"),
+        );
+        let b_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols)
+                    .map(|idx| idx as f64 * 0.02 + 1.0)
+                    .collect(),
+            )
+            .expect("finite b"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()])
+            .expect("nonfinite chi2 falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite chi2");
         assert_eq!(through_eval, through_generic);
     }
 

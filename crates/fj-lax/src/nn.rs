@@ -1461,6 +1461,67 @@ pub fn r2_score_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+fn chi_squared_distance_row(a: &[f64], b: &[f64]) -> f64 {
+    let mut acc = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        let d = av - bv;
+        acc += (d * d) / (av + bv);
+    }
+    acc
+}
+
+/// Chi-squared distance `Σ (a-b)² / (a+b)` along the last axis of two 2D arrays, one scalar per row
+/// (the histogram / feature-matching χ² distance; `sklearn.metrics.pairwise.additive_chi2_kernel` is its
+/// negation). ROW-PARALLEL and BIT-IDENTICAL to the decomposed
+/// `Sub(a,b) → Mul(square) | Add(a,b) | Div → ReduceSum(axis=1)` graph via [`chi_squared_distance_row`]:
+/// each per-element term recomputes `(a-b)` (Sub), squares it (Mul), forms `(a+b)` (Add) and divides
+/// (TRUE Div) exactly as the materialized tensors, and the accumulator is an index-order sum matching
+/// `ReduceSum`. Used by the interpreter χ²-distance superinstruction. NOTE: an element with `a+b == 0`
+/// yields `0/0` NaN (or ±inf) via EITHER path; the recognizer only dispatches here for all-finite input
+/// (nonfinite falls through). Distinct from `euclidean_distance_2d`/`mean_squared_error_2d` (no per-element
+/// `(a+b)` divisor).
+#[must_use]
+pub fn chi_squared_distance_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D chi_squared_distance a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D chi_squared_distance b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = chi_squared_distance_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = chi_squared_distance_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 fn explained_variance_score_row(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len() as f64;
     // variance of the residual r = a - b
