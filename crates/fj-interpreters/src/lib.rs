@@ -1125,6 +1125,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_log_sigmoid_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_scalar_half_arith(jaxpr, const_values, args) {
         return result;
     }
@@ -2021,6 +2025,81 @@ fn try_eval_top_level_gelu_erf_f64(
     }
 
     let output = fj_lax::nn::gelu_erf(values);
+    Some(
+        TensorValue::new_f64_values(input.shape.clone(), output)
+            .map(Value::Tensor)
+            .map(|value| vec![value])
+            .map_err(EvalError::InvalidTensor)
+            .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the log-sigmoid activation graph `-log(1 + exp(-x))`
+/// (`jax.nn.log_sigmoid`, direct form): the 5-equation elementwise chain
+/// `Neg(x) → Exp → Add(1, ·) → Log → Neg`. Pure elementwise (shape-agnostic); the general fuser
+/// cannot fuse it because `Exp`/`Log` are not `CheapOp`s. Finite dense f64 only, else falls
+/// through. Bit-identical: `log_sigmoid_direct` uses only `exp`/`ln` (both bit-identical to the
+/// `Exp`/`Log` primitives, per the softmax/log-softmax superinstructions) in the graph's grouping.
+fn try_eval_top_level_log_sigmoid_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 5
+        || args.len() != 1
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let out = jaxpr.outvars[0];
+    let [neg_eq, exp_eq, add_eq, log_eq, neg2_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    let nx = single_output_for_primitive(neg_eq, Primitive::Neg)?;
+    if neg_eq.inputs.as_slice() != [Atom::Var(x)] {
+        return None;
+    }
+    let e = single_output_for_primitive(exp_eq, Primitive::Exp)?;
+    if exp_eq.inputs.as_slice() != [Atom::Var(nx)] {
+        return None;
+    }
+    let one_plus = single_output_for_primitive(add_eq, Primitive::Add)?;
+    let add_const = match add_eq.inputs.as_slice() {
+        [Atom::Var(v), atom] if *v == e => f64_literal(atom),
+        [atom, Atom::Var(v)] if *v == e => f64_literal(atom),
+        _ => None,
+    };
+    if add_const?.to_bits() != 1.0_f64.to_bits() {
+        return None;
+    }
+    let sp = single_output_for_primitive(log_eq, Primitive::Log)?;
+    if log_eq.inputs.as_slice() != [Atom::Var(one_plus)] {
+        return None;
+    }
+    let neg2 = single_output_for_primitive(neg2_eq, Primitive::Neg)?;
+    if neg2 != out || neg2_eq.inputs.as_slice() != [Atom::Var(sp)] {
+        return None;
+    }
+
+    let Value::Tensor(input) = &args[0] else {
+        return None;
+    };
+    if input.dtype != DType::F64 {
+        return None;
+    }
+    let values = input.elements.as_f64_slice()?;
+    if !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::log_sigmoid_direct(values);
     Some(
         TensorValue::new_f64_values(input.shape.clone(), output)
             .map(Value::Tensor)
@@ -20094,6 +20173,102 @@ mod tests {
             .expect("nonfinite gelu falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite gelu");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_log_sigmoid_jaxpr() -> Jaxpr {
+        let x = VarId(1);
+        let nx = VarId(2);
+        let e = VarId(3);
+        let one_plus = VarId(4);
+        let sp = VarId(5);
+        let out = VarId(6);
+        Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![nx],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(nx)],
+                    outputs: smallvec![e],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(e)],
+                    outputs: smallvec![one_plus],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(one_plus)],
+                    outputs: smallvec![sp],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(sp)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_log_sigmoid_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.41).cos() * 4.0 - 1.5)
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .expect("dense f64 input"),
+        );
+        let jaxpr = make_log_sigmoid_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).expect("fast log_sigmoid");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[input]).expect("generic log_sigmoid");
+        assert_eq!(fast, generic);
+
+        let mut nonfinite_data: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        nonfinite_data[cols + 1] = f64::NAN;
+        let nonfinite = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                nonfinite_data,
+            )
+            .expect("dense nonfinite f64 input"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, std::slice::from_ref(&nonfinite))
+            .expect("nonfinite log_sigmoid falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite log_sigmoid");
         assert_eq!(through_eval, through_generic);
     }
 

@@ -325,6 +325,62 @@ fn build_gelu_erf_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_log_sigmoid_jaxpr() -> Jaxpr {
+    let x = VarId(1);
+    let nx = VarId(2);
+    let e = VarId(3);
+    let one_plus = VarId(4);
+    let sp = VarId(5);
+    let out = VarId(6);
+    Jaxpr::new(
+        vec![x],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Neg,
+                inputs: smallvec::smallvec![Atom::Var(x)],
+                outputs: smallvec::smallvec![nx],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Exp,
+                inputs: smallvec::smallvec![Atom::Var(nx)],
+                outputs: smallvec::smallvec![e],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec::smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(e)],
+                outputs: smallvec::smallvec![one_plus],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Log,
+                inputs: smallvec::smallvec![Atom::Var(one_plus)],
+                outputs: smallvec::smallvec![sp],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Neg,
+                inputs: smallvec::smallvec![Atom::Var(sp)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_softmax_cross_entropy_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let logits = VarId(1);
     let labels = VarId(2);
@@ -720,6 +776,16 @@ fn eval_gelu_erf_decomposed(input: &Value) -> Value {
     )
     .expect("half");
     eval_primitive(Primitive::Mul, &[half_x, one_plus], &empty).expect("scale")
+}
+
+fn eval_log_sigmoid_decomposed(input: &Value) -> Value {
+    let empty = BTreeMap::new();
+    let nx = eval_primitive(Primitive::Neg, std::slice::from_ref(input), &empty).expect("neg");
+    let e = eval_primitive(Primitive::Exp, std::slice::from_ref(&nx), &empty).expect("exp");
+    let one_plus =
+        eval_primitive(Primitive::Add, &[Value::scalar_f64(1.0), e], &empty).expect("add one");
+    let sp = eval_primitive(Primitive::Log, std::slice::from_ref(&one_plus), &empty).expect("log");
+    eval_primitive(Primitive::Neg, std::slice::from_ref(&sp), &empty).expect("neg out")
 }
 
 fn eval_softmax_cross_entropy_2d_decomposed(
@@ -1221,6 +1287,21 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 eval_jaxpr(black_box(&gelu_jaxpr), std::slice::from_ref(&softmax_input)).unwrap(),
+            )
+        })
+    });
+    let log_sigmoid_jaxpr = build_log_sigmoid_jaxpr();
+    group.bench_function("log_sigmoid/orig_decomposed_4096x1024", |b| {
+        b.iter(|| black_box(eval_log_sigmoid_decomposed(black_box(&softmax_input))))
+    });
+    group.bench_function("log_sigmoid/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(
+                    black_box(&log_sigmoid_jaxpr),
+                    std::slice::from_ref(&softmax_input),
+                )
+                .unwrap(),
             )
         })
     });

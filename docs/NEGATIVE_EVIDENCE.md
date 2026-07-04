@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 8.70x vs ORIG: log-sigmoid activation graph recognized as a fused (threaded) interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::log_sigmoid_direct`). Genuinely different
+  primitive from the shipped normalization/loss/GELU macro-ops: `jax.nn.log_sigmoid(x)` =
+  `-log(1 + exp(-x))`, the numerically-direct form, a PURE-ELEMENTWISE 5-equation chain
+  `Neg(x) → Exp → Add(1, ·) → Log → Neg`. Deliberately Exp/Log-only (NOT the softplus/tanh identity):
+  `eval_exp`/`eval_log` are proven scalar-bit-identical (softmax/log-softmax superinstructions), whereas
+  `eval_tanh` dispatches SIMD `tanh_f64x8` whose bit-identity is unverified, so tanh-based activations
+  (Mish, tanh-GELU) were avoided. The general elementwise fuser cannot fuse this graph because
+  `Exp`/`Log` are not `CheapOp`s (`cheap_op` = Add/Sub/Mul/Div/Neg/Max/Min/Abs only), so the decomposed
+  path breaks at Exp and materializes 5 intermediate Vecs (plus scalar broadcasts). Worktree audit:
+  no unlanded win.
+- LEVER: a top-level superinstruction for the exact 5-equation finite dense f64 log-sigmoid graph,
+  computed in one threaded `log_sigmoid_direct` pass. BIT-IDENTICAL to the generic path:
+  `log_sigmoid_direct` uses only `exp`/`ln` (both bit-identical to the `Exp`/`Log` primitives) in the
+  graph's exact grouping `-((1.0 + (-v).exp()).ln())`. Constant `1.0` matched by `to_bits`;
+  `Add(1, e)` commutative → order-agnostic bits. Shape-agnostic (elementwise); finite dense f64 only,
+  else falls through. NOTE: `nn::log_sigmoid` (the STABLE `-softplus(-x)` form) differs from the naive
+  graph in the last bit, so a dedicated `log_sigmoid_direct` matches the decomposed grouping exactly.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed log_sigmoid --
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`; worker was contended so the
+  absolute ms carry variance, but the ratio is stable ~7.8-9.9x across low/median/high):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/log_sigmoid/orig_decomposed_4096x1024` | 106.61 ms |
+  | `compiled_dispatch/log_sigmoid/fast_eval_jaxpr_4096x1024` | 12.248 ms |
+
+  Ratio vs ORIG: **0.115x time / 8.70x faster.** Bigger than GELU (3.53x) because the decomposed GELU
+  path used SIMD `erf_f64x8` (fast intermediate) whereas the decomposed Exp/Log path is scalar, so the
+  fuser's saved intermediate materialization dominates more here.
+- VALIDATION: `eval_top_level_log_sigmoid_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on random f64; nonfinite falls through); all 8 superinstruction parity tests GREEN. Pre-
+  existing INDEPENDENT RED (NOT this additive change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` f64 (churned arena/native-f32
+  cbrt area) — this diff touches no cbrt/arena code.
+
 ## 2026-07-04 - WIN 3.53x vs ORIG: exact GELU (erf) activation graph recognized as a fused interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::gelu_erf`). Genuinely different from
