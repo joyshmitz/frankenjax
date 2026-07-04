@@ -2,6 +2,46 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 5.53x vs ORIG: row-wise log-sum-exp reduction recognized as a fused (row-parallel) interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallelized `fj-lax::nn::logsumexp_2d`).
+  Genuinely different primitive from the pointwise activation macro-ops (silu/log_sigmoid/gelu):
+  `jax.scipy.special.logsumexp` / `jax.nn.logsumexp` over the last axis =
+  `max(x) + log(sum(exp(x - max(x))))`, a RANK-REDUCING reduction (f64 [rows,cols] → [rows]), the
+  canonical numerically-stable normalizing constant at the core of losses/partition functions. The
+  7-equation graph `ReduceMax(axis=1) → BroadcastInDim → Sub → Exp → ReduceSum(axis=1) → Log → Add`.
+  The general elementwise fuser cannot fuse it (Exp/Log ∉ `cheap_op`, AND the two reductions break the
+  elementwise fuser), so the decomposed path materializes the full [rows,cols] shifted+exp
+  intermediates plus per-reduction Vecs. Worktree audit: HEAD==origin/main, no unlanded win.
+- LEVER: a top-level superinstruction for the exact 7-eq finite dense f64 logsumexp graph, computed via
+  `nn::logsumexp_2d`. BIT-IDENTICAL to the generic path: reuses the same fold-max reduction +
+  index-order exp-sum + `max + log(sum)` op forms proven bit-exact by the cross-entropy
+  superinstruction (whose inner log-softmax IS this same subgraph). `Add(max, logv)` matched in either
+  operand order (IEEE-commutative); `ReduceMax`/`ReduceSum` gated to `axes="1"`, broadcast to
+  `dims="0"` + exact `rows,cols` shape; finite dense rank-2 f64 only, else falls through.
+- KEY (threading lesson, re-confirmed): the fused kernel MUST be ROW-PARALLEL. `logsumexp_2d` was a
+  SERIAL `(0..rows).map(logsumexp).collect()` → measured only **1.91x** (56.1ms→29.4ms, below the 2x
+  bar). Row-parallelizing the outer loop (distribute rows across `softmax_2d_thread_count` threads,
+  each row still through the unchanged `logsumexp` → trivially bit-identical) lifted the fused side
+  29.4ms→10.8ms = **5.53x**. Serial fused leaves ~2-3x on the table for these row-wise reductions.
+  Empty-row (`cols==0` → `logsumexp(&[])==-inf`) semantics preserved on the serial path.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed logsumexp
+  -m 3 -s 20`, 4096x1024, tight CIs so low variance):
+
+  | kernel | orig_decomposed median | fast_eval_jaxpr median | ratio |
+  | --- | ---: | ---: | ---: |
+  | serial logsumexp_2d (before) | 56.139 ms | 29.366 ms | 1.91x |
+  | **row-parallel (shipped)** | 59.769 ms | **10.800 ms** | **5.53x** |
+
+  Fused vs ORIG: **0.181x time / 5.53x faster.**
+- VALIDATION: `eval_top_level_logsumexp_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on random f64; nonfinite falls through) — passes BOTH before and after the kernel was
+  parallelized (bit-identity preserved). fj-lax `nn::` 61/61 GREEN (kernel change is bit-safe); all 10
+  superinstruction parity tests GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 5.59x vs ORIG: SiLU / swish activation graph recognized as a fused (threaded) interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (reuses `fj-lax::nn::silu`). Genuinely different
