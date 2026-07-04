@@ -400,6 +400,70 @@ pub fn logsumexp_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     result
 }
 
+/// Population variance of a single row, `mean((x - mean(x))²)`, bit-identical to the decomposed
+/// `ReduceSum → Div(·, n) → Sub → Mul(·, ·) → ReduceSum → Div(·, n)` jaxpr: index-order sum for the
+/// mean, then index-order sum of squared centered deviations, both divided by `n = cols`. Callers
+/// guarantee a non-empty row.
+fn variance_row(row: &[f64]) -> f64 {
+    let n = row.len() as f64;
+    let mut sum = 0.0;
+    for &v in row {
+        sum += v;
+    }
+    let mean = sum / n;
+    let mut sq_sum = 0.0;
+    for &v in row {
+        let centered = v - mean;
+        sq_sum += centered * centered;
+    }
+    sq_sum / n
+}
+
+/// Population variance (`ddof=0`) along the last axis of a 2D array, one scalar per row
+/// (`jax.numpy.var(x, axis=-1)`). ROW-PARALLEL and BIT-IDENTICAL to the decomposed
+/// `ReduceSum → Div(mean) → BroadcastInDim → Sub → Mul(square) → ReduceSum → Div(var)` graph
+/// (same index-order reductions + `sum/n` mean grouping via [`variance_row`]); rows are independent
+/// so only the outer loop is threaded, above the `softmax_2d_thread_count` work gate. Used by the
+/// interpreter variance superinstruction. NOTE: `mean((x-mean)²)` = the population variance
+/// `E[x²]-E[x]²` but computed in the two-pass centered form JAX emits (NOT the one-pass raw-moment
+/// form, which differs in the last bit).
+#[must_use]
+pub fn variance_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _len = checked_2d_row_major_len("2D variance", x, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = variance_row(&x[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let x_block = &x[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = variance_row(&x_block[start..start + cols]);
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
 ///
 /// Matches `jax.nn.softmax(x)` for a 1D array.

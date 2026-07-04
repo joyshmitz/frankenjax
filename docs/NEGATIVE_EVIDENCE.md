@@ -2,6 +2,45 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 13.38x vs ORIG: row-wise population variance recognized as a fused (row-parallel) interpreter superinstruction — BIGGEST of the session (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::variance_2d`). A genuine
+  PIVOT off the nn-activation/gated family: `jax.numpy.var(x, axis=-1)` (`ddof=0`) =
+  `mean((x - mean(x))²)`, a STATISTICAL MOMENT REDUCTION with NO transcendentals — distinct from both
+  the pointwise activations (silu/gelu/softplus/gated-GLUs) AND the exp/log reductions
+  (logsumexp/cross-entropy). The 7-equation graph `ReduceSum(axis=1) → Div(·, n) → BroadcastInDim →
+  Sub → Mul(square) → ReduceSum(axis=1) → Div(·, n)`, f64 [rows,cols] → [rows] (rank-reducing). The
+  general fuser cannot fuse it (the two reductions break the elementwise fuser), so the decomposed
+  path materializes TWO full [rows,cols] intermediates (centered + squared) plus per-reduction Vecs.
+  Worktree audit: HEAD==origin/main, no unlanded win.
+- LEVER: a top-level superinstruction for the exact 7-eq finite dense f64 variance graph, computed via
+  the row-parallel `variance_2d`. BIT-IDENTICAL: `variance_row` does an index-order sum for the mean
+  (`sum/n`), then an index-order sum of `(v-mean)²`, divided by `n` — matching the graph's
+  reduction order + `Div(·, n)` mean/var grouping. Both `Div` divisors are validated to equal exactly
+  `cols` (as f64, `to_bits`); broadcast must restore `rows,cols`; `Mul(centered, centered)` requires
+  BOTH operands to be the same var; finite dense rank-2 f64 only, else falls through. Two-pass CENTERED
+  form (matches JAX) — NOT the one-pass raw-moment `E[x²]-E[x]²` (differs in the last bit).
+- KEY (why 13.38x — biggest of the session): the fused kernel has NO transcendental, so it is pure
+  bandwidth + cheap FLOPs → **4.68 ms** (row-parallel), whereas the decomposed path pays full
+  interpreter dispatch to materialize two [rows,cols] matrices + broadcast + two reductions → 62.6 ms.
+  Transcendental-free reductions give the LARGEST superinstruction multiples (the fused side isn't
+  transcendental-bound). Kernel was row-parallel from the start (threading lesson applied up front).
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed var_2d -m 3 -s 20`,
+  4096x1024):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/var_2d/orig_decomposed_4096x1024` | 62.621 ms |
+  | `compiled_dispatch/var_2d/fast_eval_jaxpr_4096x1024` | 4.6793 ms |
+
+  Ratio vs ORIG: **0.075x time / 13.38x faster** (worst-case CI 12.20x, best 14.85x; robustly ≥2x).
+- VALIDATION: `eval_top_level_var_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on random f64; nonfinite falls through); fj-lax `nn::` 61/61 GREEN; all 14
+  superinstruction parity tests GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - WIN 5.34x vs ORIG: GEGLU gated-MLP unit recognized as a fused (threaded) 2-input interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::geglu`). Genuinely different from the
