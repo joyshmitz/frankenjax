@@ -9316,10 +9316,16 @@ fn extremum_along_axis(
             // output row is the INDEPENDENT block `values[outer*axis_dim..]`, so thread
             // over output rows. `base = outer*axis_dim <= total` (no overflow/OOB).
             // Bit-identical to the serial loop (each row's argmax is order-deterministic).
-            let idx = parallel_argmax_fill(outer_count, total, |outer| {
-                let base = outer * axis_dim;
-                arg_extreme_f64_contiguous_simd(&values[base..base + axis_dim], find_max) as i64
-            });
+            // Full-reduction (single output row): `parallel_argmax_fill` threads over
+            // output ROWS, so it cannot parallelize one long row — thread WITHIN the row.
+            let idx = if outer_count == 1 {
+                vec![threaded_arg_extreme_f64_contiguous(values, find_max) as i64]
+            } else {
+                parallel_argmax_fill(outer_count, total, |outer| {
+                    let base = outer * axis_dim;
+                    arg_extreme_f64_contiguous_simd(&values[base..base + axis_dim], find_max) as i64
+                })
+            };
             // Rank-0 result (1D input -> scalar) must return Value::Scalar to match
             // the finalization contract below; a rank-0 tensor breaks as_i64_scalar.
             if result_shape.dims.is_empty() {
@@ -12995,6 +13001,72 @@ fn arg_extreme_f64_contiguous_simd(values: &[f64], find_max: bool) -> usize {
         }
     }
 
+    best_idx
+}
+
+/// Threaded single-row contiguous f64 arg-extreme. Splits ONE long row across
+/// threads; each thread runs the SIMD scan (`arg_extreme_f64_contiguous_simd`) over
+/// its disjoint chunk, then the chunk winners are combined sequentially in ASCENDING
+/// global-index order by: sticky first-NaN (a NaN chunk freezes the result at its
+/// first-NaN index — later chunks cannot displace it), else strictly-better value,
+/// else the lower global index (first occurrence). This reproduces the single-thread
+/// scan's `best`/`best_nan` fold exactly (`arg_extreme_float` stops at the first NaN
+/// and updates max only on strict `>`), so it is BIT-IDENTICAL for any partition —
+/// proven by `threaded_arg_extreme_f64_matches_serial`.
+///
+/// This is the FULL-REDUCTION lever: for `outer_count == 1` (a 1-D input, or a single
+/// output row) `parallel_argmax_fill` cannot thread — it fans out over output ROWS and
+/// there is only one — so the 16M single-axis argmax ran one SIMD thread (~10.9ms) while
+/// the sibling `ReduceMax` threads across cores (~2.3ms). Below the DRAM-bound threshold
+/// it stays the plain single-threaded SIMD scan.
+fn threaded_arg_extreme_f64_contiguous(values: &[f64], find_max: bool) -> usize {
+    let n = values.len();
+    let threads = crate::arithmetic::work_scaled_threads(n);
+    if n < crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN || threads <= 1 {
+        return arg_extreme_f64_contiguous_simd(values, find_max);
+    }
+    let chunk = n.div_ceil(threads);
+    // (global_start, chunk-local winner index) per chunk, in ascending start order
+    // (chunks() yields ascending, and the handle Vec preserves spawn order on join).
+    let partials: Vec<(usize, usize)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = values
+            .chunks(chunk)
+            .enumerate()
+            .map(|(ci, cv)| {
+                scope.spawn(move || (ci * chunk, arg_extreme_f64_contiguous_simd(cv, find_max)))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
+                Ok(partial) => partial,
+                Err(payload) => std::panic::resume_unwind(payload),
+            })
+            .collect()
+    });
+
+    let mut best_idx = 0usize;
+    let mut best_val = 0.0f64;
+    let mut seen_nan = false;
+    let mut first = true;
+    for (start, local) in partials {
+        if seen_nan {
+            break;
+        }
+        let gi = start + local;
+        let v = values[gi];
+        if v.is_nan() {
+            best_idx = gi;
+            seen_nan = true;
+        } else if first {
+            best_idx = gi;
+            best_val = v;
+            first = false;
+        } else if (find_max && v > best_val) || (!find_max && v < best_val) {
+            best_idx = gi;
+            best_val = v;
+        }
+    }
     best_idx
 }
 
@@ -28917,6 +28989,86 @@ mod tests {
         let result = eval_argmax(Primitive::Argmax, &[x], &BTreeMap::new()).unwrap();
         let idx = result.as_i64_scalar().expect("expected scalar i64 result");
         assert_eq!(idx, 4);
+    }
+
+    #[test]
+    fn threaded_arg_extreme_f64_matches_serial() {
+        // The threaded single-row arg-extreme must be BIT-IDENTICAL to the
+        // single-threaded SIMD scan for any partition — over ties, +-inf, +-0, and
+        // NaN at various positions (including the first chunk, a later chunk, and the
+        // tail). Sizes straddle CHEAP_BINARY_PARALLEL_MIN so threading actually engages.
+        let min_par = crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN;
+        let sizes = [min_par + 1, min_par + 12_345, min_par * 2 + 777];
+        for &n in &sizes {
+            // Deterministic pseudo-data with duplicated extrema (first-occurrence ties).
+            let mut data: Vec<f64> = (0..n)
+                .map(|i| {
+                    let x = ((i as f64) * 1.000_173).sin() * 10.0 - (i as f64) * 1e-7;
+                    match i % 5000 {
+                        0 => 7.5,           // duplicated max to exercise ties
+                        1 => -7.5,          // duplicated min
+                        2 => f64::INFINITY, // repeated +inf
+                        3 => f64::NEG_INFINITY,
+                        _ => x,
+                    }
+                })
+                .collect();
+            for &find_max in &[true, false] {
+                // No-NaN case.
+                assert_eq!(
+                    threaded_arg_extreme_f64_contiguous(&data, find_max),
+                    arg_extreme_f64_contiguous_simd(&data, find_max),
+                    "no-nan mismatch n={n} find_max={find_max}"
+                );
+            }
+            // NaN in several positions — sticky first-NaN must match.
+            for &nan_at in &[0usize, 3, n / 3, n - 9, n - 1] {
+                let mut d2 = data.clone();
+                d2[nan_at] = f64::NAN;
+                for &find_max in &[true, false] {
+                    assert_eq!(
+                        threaded_arg_extreme_f64_contiguous(&d2, find_max),
+                        arg_extreme_f64_contiguous_simd(&d2, find_max),
+                        "nan@{nan_at} mismatch n={n} find_max={find_max}"
+                    );
+                }
+            }
+            // Two NaNs — first (lowest index) must win.
+            data[n / 4] = f64::NAN;
+            data[n / 2] = f64::NAN;
+            for &find_max in &[true, false] {
+                assert_eq!(
+                    threaded_arg_extreme_f64_contiguous(&data, find_max),
+                    arg_extreme_f64_contiguous_simd(&data, find_max),
+                    "two-nan mismatch n={n} find_max={find_max}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_argmax_full_reduce_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<f64> = (0..n).map(|i| 0.5 + (i % 9973) as f64 * 1e-4).collect();
+        let time_it = |label: &str, f: &dyn Fn() -> usize| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("ARGMAX {label}: {:.3}ms", b * 1e3);
+        };
+        // Same-invocation, contention-immune A/B (min of 8 each, back-to-back).
+        time_it("f64_16M_serial", &|| {
+            arg_extreme_f64_contiguous_simd(&data, true)
+        });
+        time_it("f64_16M_threaded", &|| {
+            threaded_arg_extreme_f64_contiguous(&data, true)
+        });
     }
 
     #[test]

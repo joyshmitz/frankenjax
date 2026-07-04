@@ -2,6 +2,38 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 1.96x: argmax/argmin full-reduction (single long axis) THREADED — 16M f64 10.13ms -> 5.18ms, bit-identical (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `tensor_ops.rs`. Remote via rch
+  (`CARGO_TARGET_DIR=.../blackthrush`).
+- GAP (measured, `bench_full_reduce_vs_jax`): `Primitive::Argmax`/`Argmin` over a single
+  long axis — `outer_count == 1`, e.g. a 1-D 16M f64 full reduce — ran SINGLE-THREADED at
+  **10.881ms**, while the sibling `ReduceMax` threads across cores at **2.292ms** on the
+  identical 128MB read. Root cause: `parallel_argmax_fill` fans out over output ROWS, but
+  a full reduction has exactly ONE output row, so it never engages its thread pool — the
+  whole 16M scan ran on one SIMD thread (`arg_extreme_f64_contiguous_simd`).
+- LEVER (alien-graveyard: parallel-reduction / independent-partition fan-out):
+  `threaded_arg_extreme_f64_contiguous` splits the single row into `work_scaled_threads`
+  disjoint chunks, runs the EXISTING SIMD scan per chunk, then combines the chunk winners
+  in ascending global-index order by (sticky first-NaN | strictly-better value | lower
+  global index). BIT-IDENTICAL to the single-thread scan for ANY partition — the serial
+  `arg_extreme_float` fold stops at the first NaN and updates only on strict `>`/`<`, so
+  the chunk-granularity replay reproduces it exactly. Wired ONLY for `outer_count == 1`
+  (the multi-row contiguous path already threads over rows). f64 only this pass; the
+  i64/f32 single-row full-reduce is still single-threaded (identical pattern — follow-up).
+- MEASURED (rch, same-invocation min-of-8 A/B, contention-immune,
+  `bench_argmax_full_reduce_threaded_vs_serial`):
+  **serial 10.133ms -> threaded 5.176ms = 1.96x.** Still above the `max` 2.29ms floor
+  (argmax carries per-lane index-select + NaN-fallback the pure `simd_max` reduce does
+  not), but nearly halves the op and narrows the JAX full-reduce loss.
+- Correctness: `threaded_arg_extreme_f64_matches_serial` (ties, +-inf, +-0, NaN at first
+  chunk / mid / tail / two-NaN-first-wins, sizes straddling `CHEAP_BINARY_PARALLEL_MIN`)
+  + 22 existing argmax/argmin/extremum tests all GREEN. EV: KEEP.
+- Retry note: the residual `argmax(5.18) > max(2.29)` gap is index-select overhead, not
+  under-threading — do not re-probe thread count. Next: extend the same wrapper to i64
+  (`arg_extreme_i64_contiguous`) and f32 (`arg_extreme_f32_contiguous_simd`) single-row
+  full-reduce.
+
 ## 2026-07-04 - reduce_sum STALE-LOSS RESOLVED (now BEATS JAX 1.6-2.7x) + SIMD-per-thread partial NO-SHIP 0.98x (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Bench: `reduction::tests::bench_full_reduce_vs_jax`
