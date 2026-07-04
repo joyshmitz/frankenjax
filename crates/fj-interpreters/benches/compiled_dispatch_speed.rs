@@ -268,6 +268,63 @@ fn build_log_softmax_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     )
 }
 
+fn build_gelu_erf_jaxpr() -> Jaxpr {
+    let x = VarId(1);
+    let arg = VarId(2);
+    let e = VarId(3);
+    let one_plus = VarId(4);
+    let half_x = VarId(5);
+    let out = VarId(6);
+    let sqrt2 = Literal::from_f64(2.0_f64.sqrt());
+    Jaxpr::new(
+        vec![x],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Lit(sqrt2)],
+                outputs: smallvec::smallvec![arg],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Erf,
+                inputs: smallvec::smallvec![Atom::Var(arg)],
+                outputs: smallvec::smallvec![e],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec::smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(e)],
+                outputs: smallvec::smallvec![one_plus],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(x), Atom::Lit(Literal::from_f64(0.5))],
+                outputs: smallvec::smallvec![half_x],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(half_x), Atom::Var(one_plus)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_softmax_cross_entropy_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
     let logits = VarId(1);
     let labels = VarId(2);
@@ -643,6 +700,26 @@ fn eval_log_softmax_2d_decomposed(input: &Value, rows: usize, cols: usize) -> Va
     let logv = eval_primitive(Primitive::Log, std::slice::from_ref(&sum), &empty).expect("log");
     let log_b = eval_primitive(Primitive::BroadcastInDim, &[logv], &bcast).expect("broadcast log");
     eval_primitive(Primitive::Sub, &[shifted, log_b], &empty).expect("subtract log")
+}
+
+fn eval_gelu_erf_decomposed(input: &Value) -> Value {
+    let empty = BTreeMap::new();
+    let arg = eval_primitive(
+        Primitive::Div,
+        &[input.clone(), Value::scalar_f64(2.0_f64.sqrt())],
+        &empty,
+    )
+    .expect("div");
+    let e = eval_primitive(Primitive::Erf, std::slice::from_ref(&arg), &empty).expect("erf");
+    let one_plus =
+        eval_primitive(Primitive::Add, &[Value::scalar_f64(1.0), e], &empty).expect("add one");
+    let half_x = eval_primitive(
+        Primitive::Mul,
+        &[input.clone(), Value::scalar_f64(0.5)],
+        &empty,
+    )
+    .expect("half");
+    eval_primitive(Primitive::Mul, &[half_x, one_plus], &empty).expect("scale")
 }
 
 fn eval_softmax_cross_entropy_2d_decomposed(
@@ -1134,6 +1211,17 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     group.bench_function("softmax_cross_entropy_2d/fast_eval_jaxpr_4096x1024", |b| {
         b.iter(|| {
             black_box(eval_jaxpr(black_box(&cross_entropy_jaxpr), black_box(&ce_args)).unwrap())
+        })
+    });
+    let gelu_jaxpr = build_gelu_erf_jaxpr();
+    group.bench_function("gelu_erf/orig_decomposed_4096x1024", |b| {
+        b.iter(|| black_box(eval_gelu_erf_decomposed(black_box(&softmax_input))))
+    });
+    group.bench_function("gelu_erf/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(black_box(&gelu_jaxpr), std::slice::from_ref(&softmax_input)).unwrap(),
+            )
         })
     });
     for &(rows, cols) in &[(4096usize, 1024usize), (16384, 1024)] {

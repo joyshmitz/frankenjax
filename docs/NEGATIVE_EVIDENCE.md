@@ -2,6 +2,40 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 3.53x vs ORIG: exact GELU (erf) activation graph recognized as a fused interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::gelu_erf`). Genuinely different from
+  the shipped normalization/loss macro-ops: GELU is the ubiquitous transformer ACTIVATION,
+  `jax.nn.gelu(approximate=False)` = `0.5·x·(1 + erf(x/√2))`, and — unlike the softmax family — is a
+  PURE-ELEMENTWISE graph (no broadcast/reduce). It still can't be fused by the general elementwise
+  fuser because `Erf` is NOT a `CheapOp` (`cheap_op` = Add/Sub/Mul/Div/Neg/Max/Min/Abs only), so the
+  decomposed path breaks at Erf and materializes intermediates. Worktree audit: no unlanded win.
+- LEVER: a top-level superinstruction for the exact 5-equation finite dense f64 GELU graph
+  `Div(x, √2) → Erf → Add(1, ·) → Mul(x, 0.5) → Mul`, computed in one threaded `gelu_erf` pass.
+  BIT-IDENTICAL to the generic path: `gelu_erf` calls the SAME `arithmetic::erf_approx` the `Erf`
+  primitive dispatches to (its SIMD `erf_f64x8` is bit-identical to `erf_approx` — verified live by the
+  parity test) and matches the graph's `(x·0.5)·(1 + erf(x/√2))` grouping (Add/Mul commutative → order-
+  agnostic bits; Div is `x/√2`). Constants √2/1.0/0.5 matched by `to_bits`. Shape-agnostic (elementwise);
+  finite dense f64 only, else falls through.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed gelu_erf --
+  --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`; worker was contended so the
+  absolute ms carry variance, but the ratio is stable ~3.2-3.7x across low/median/high):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/gelu_erf/orig_decomposed_4096x1024` | 106.21 ms |
+  | `compiled_dispatch/gelu_erf/fast_eval_jaxpr_4096x1024` | 30.118 ms |
+
+  Ratio vs ORIG: **0.284x time / 3.53x faster.** NOTE (headroom, not shipped): the fused kernel uses
+  SCALAR `erf_approx` while the decomposed `Erf` uses SIMD `erf_f64x8`; a future SIMD-erf fused kernel
+  (bit-identical, since `erf_f64x8`==`erf_approx`) would cut the fused ~30ms toward ~20ms (≈5x).
+- VALIDATION: `eval_top_level_gelu_erf_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on random f64; nonfinite falls through); all 8 superinstruction tests GREEN; fj-lax
+  `nn::` 61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this additive change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` f64 (churned arena/native-f32
+  cbrt area, 84b44a86/c047af73) — this diff touches no cbrt/arena code.
+
 ## 2026-07-04 - WIN 9.63x vs ORIG: softmax cross-entropy loss graph recognized as a fused (threaded) 2-input interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::softmax_cross_entropy_2d`). The

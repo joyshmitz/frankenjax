@@ -143,6 +143,21 @@ pub fn gelu(x: &[f64]) -> Vec<f64> {
     })
 }
 
+/// Exact GELU `0.5·x·(1 + erf(x/√2))` (`jax.nn.gelu(approximate=False)`), computed in the
+/// operation grouping of the decomposed graph: `(x·0.5) · (1 + erf(x / √2))`. Calls the SAME
+/// `arithmetic::erf_approx` that the `Erf` primitive dispatches to (its SIMD `erf_f64x8` is
+/// bit-identical to `erf_approx`), so this is bit-for-bit identical to the decomposed
+/// `Div → Erf → Add → Mul → Mul` jaxpr. Elementwise (order-independent) → threads flat. Used by
+/// the interpreter GELU superinstruction.
+#[must_use]
+pub fn gelu_erf(x: &[f64]) -> Vec<f64> {
+    let sqrt2 = 2.0_f64.sqrt();
+    threaded_f64_map(x, move |v| {
+        let e = crate::arithmetic::erf_approx(v / sqrt2);
+        (v * 0.5) * (1.0 + e)
+    })
+}
+
 /// ELU (Exponential Linear Unit): x if x > 0 else alpha * (exp(x) - 1)
 ///
 /// Matches `jax.nn.elu(x, alpha)`, which uses `expm1` (not `exp(x) - 1`) so the

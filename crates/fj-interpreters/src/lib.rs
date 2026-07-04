@@ -1121,6 +1121,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_gelu_erf_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_scalar_half_arith(jaxpr, const_values, args) {
         return result;
     }
@@ -1921,6 +1925,108 @@ fn try_eval_top_level_softmax_cross_entropy_2d_f64(
         .map(|value| vec![value])
         .map_err(EvalError::InvalidTensor)
         .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the exact GELU activation graph
+/// `0.5·x·(1 + erf(x/√2))` (`jax.nn.gelu(approximate=False)`): the 5-equation elementwise chain
+/// `Div(x, √2) → Erf → Add(1, ·) → Mul(x, 0.5) → Mul`. Pure elementwise (no broadcast/reduce, so
+/// shape-agnostic) — the general fuser CANNOT fuse it because `Erf` is not a `CheapOp`, leaving
+/// intermediate materializations that the fused `gelu_erf` pass collapses. Finite dense f64 only;
+/// anything else falls through to the generic interpreter. Bit-identical: `gelu_erf` calls the
+/// same `erf_approx` the `Erf` primitive uses and matches the graph's `(x·0.5)·(1 + erf)` grouping.
+fn try_eval_top_level_gelu_erf_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 5
+        || args.len() != 1
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let out = jaxpr.outvars[0];
+    let [div_eq, erf_eq, add_eq, half_eq, mul_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    // Div(x, √2)
+    let arg = single_output_for_primitive(div_eq, Primitive::Div)?;
+    let [Atom::Var(div_lhs), div_rhs] = div_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *div_lhs != x || f64_literal(div_rhs)?.to_bits() != 2.0_f64.sqrt().to_bits() {
+        return None;
+    }
+
+    // Erf(arg)
+    let e = single_output_for_primitive(erf_eq, Primitive::Erf)?;
+    if erf_eq.inputs.as_slice() != [Atom::Var(arg)] {
+        return None;
+    }
+
+    // Add(1, e) (either operand order)
+    let one_plus = single_output_for_primitive(add_eq, Primitive::Add)?;
+    let add_const = match add_eq.inputs.as_slice() {
+        [Atom::Var(v), atom] if *v == e => f64_literal(atom),
+        [atom, Atom::Var(v)] if *v == e => f64_literal(atom),
+        _ => None,
+    };
+    if add_const?.to_bits() != 1.0_f64.to_bits() {
+        return None;
+    }
+
+    // Mul(x, 0.5) (either operand order)
+    let half_x = single_output_for_primitive(half_eq, Primitive::Mul)?;
+    let half_const = match half_eq.inputs.as_slice() {
+        [Atom::Var(v), atom] if *v == x => f64_literal(atom),
+        [atom, Atom::Var(v)] if *v == x => f64_literal(atom),
+        _ => None,
+    };
+    if half_const?.to_bits() != 0.5_f64.to_bits() {
+        return None;
+    }
+
+    // Mul(half_x, one_plus) → out (either operand order; Mul is commutative → bit-identical)
+    let mul = single_output_for_primitive(mul_eq, Primitive::Mul)?;
+    if mul != out {
+        return None;
+    }
+    let final_ok = match mul_eq.inputs.as_slice() {
+        [Atom::Var(a), Atom::Var(b)] => {
+            (*a == half_x && *b == one_plus) || (*a == one_plus && *b == half_x)
+        }
+        _ => false,
+    };
+    if !final_ok {
+        return None;
+    }
+
+    let Value::Tensor(input) = &args[0] else {
+        return None;
+    };
+    if input.dtype != DType::F64 {
+        return None;
+    }
+    let values = input.elements.as_f64_slice()?;
+    if !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::gelu_erf(values);
+    Some(
+        TensorValue::new_f64_values(input.shape.clone(), output)
+            .map(Value::Tensor)
+            .map(|value| vec![value])
+            .map_err(EvalError::InvalidTensor)
+            .map_err(InterpreterError::Primitive),
     )
 }
 
@@ -19891,6 +19997,103 @@ mod tests {
             .expect("nonfinite cross entropy falls through");
         let through_generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[logits_nf, labels])
             .expect("generic nonfinite cross entropy");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_gelu_erf_jaxpr() -> Jaxpr {
+        let x = VarId(1);
+        let arg = VarId(2);
+        let e = VarId(3);
+        let one_plus = VarId(4);
+        let half_x = VarId(5);
+        let out = VarId(6);
+        let sqrt2 = Literal::from_f64(2.0_f64.sqrt());
+        Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(x), Atom::Lit(sqrt2)],
+                    outputs: smallvec![arg],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Erf,
+                    inputs: smallvec![Atom::Var(arg)],
+                    outputs: smallvec![e],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(e)],
+                    outputs: smallvec![one_plus],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(x), Atom::Lit(Literal::from_f64(0.5))],
+                    outputs: smallvec![half_x],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(half_x), Atom::Var(one_plus)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_gelu_erf_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.37).sin() * 3.0 - 1.0)
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .expect("dense f64 input"),
+        );
+        let jaxpr = make_gelu_erf_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).expect("fast gelu");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[input]).expect("generic gelu");
+        assert_eq!(fast, generic);
+
+        let mut nonfinite_data: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        nonfinite_data[cols + 1] = f64::NAN;
+        let nonfinite = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                nonfinite_data,
+            )
+            .expect("dense nonfinite f64 input"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, std::slice::from_ref(&nonfinite))
+            .expect("nonfinite gelu falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite gelu");
         assert_eq!(through_eval, through_generic);
     }
 
