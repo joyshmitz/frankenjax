@@ -17,6 +17,21 @@ sorting inside fj-lax, not against the legacy JAX/XLA-CPU parity target. Common 
 already well ahead of JAX; only unbenchmarked niche dtype tails remain low-priority cleanup, not an active
 vs-JAX perf gap. No code change.
 
+## 2026-07-03 - WIRED BENCH + WIN CONFIRMED: iterative special fns are 33-67x FASTER than XLA-CPU (BlackThrush)
+
+Fresh RCH Criterion evidence for the newly surfaced iterative-special-function region. Production code was
+already threading these element-independent continued-fraction / series evaluations; this pass wired normal
+`fj-lax` Criterion rows (`eval/{betainc,igamma,igammac}_1m_f64_vsjax`) and re-measured them remotely on
+RCH worker `hz1` with `cargo bench -p fj-lax --bench lax_baseline ... -- --warm-up-time 1 --measurement-time 2
+--sample-size 10 --noplot`. JAX 0.10.2 CPU x64 references were the existing jaxvenv jit min-of-7 measurements:
+betainc 2639ms, `gammainc` 2192ms, `gammaincc` 1563ms for the same 1M f64 shape family.
+
+Measured fj-lax Criterion midpoints: **betainc 79.788ms = 33.1x faster than JAX**, **igamma 32.500ms =
+67.4x faster**, **igammac 37.156ms = 42.1x faster**. This corrects the earlier boundary-map claim that the
+contained XLA-weak primitive space was closed: iterative special functions are another clear XLA-CPU-weak /
+fj-strong region. Existing f64 `erf`/`lgamma`/`digamma`/`bessel_i0e` losses remain FMA-policy-gated and are
+not contradicted by this row.
+
 ## 2026-07-03 - WIRED WIN (5x; 3.6x JAX LOSS -> BEATS JAX): contiguous row-gather was WRONGLY THREADED at moderate sizes (TealMarten)
 
 Profile-first found a huge gap on the MOST common ML op: fj **gather rows [16384,256]->[4096,256] f64 =

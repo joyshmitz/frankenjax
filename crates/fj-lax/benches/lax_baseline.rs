@@ -334,6 +334,38 @@ fn bench_special_fns_4m_vs_jax(c: &mut Criterion) {
     }
 }
 
+// Iterative special functions at 1M vs JAX 0.10.2 x64 (jaxvenv, jit'd,
+// min-of-7, 2026-07-03): betainc 2639ms, gammainc 2192ms, gammaincc 1563ms.
+// These continued-fraction / series kernels are XLA-CPU weak; fj-lax threads the
+// element-independent evaluations through the expensive binary path.
+fn bench_iterative_special_fns_1m_vs_jax(c: &mut Criterion) {
+    let n = 1usize << 20;
+    let a: Vec<f64> = (0..n).map(|i| 0.5 + (i % 4517) as f64 * 0.001).collect();
+    let b: Vec<f64> = (0..n).map(|i| 0.5 + (i % 3911) as f64 * 0.0012).collect();
+    let x: Vec<f64> = (0..n).map(|i| 0.01 + (i % 97) as f64 * 0.0101).collect();
+    let betainc_inputs = [
+        Value::vector_f64(&a).unwrap(),
+        Value::vector_f64(&b).unwrap(),
+        Value::vector_f64(&x).unwrap(),
+    ];
+    let ig_a: Vec<f64> = (0..n).map(|i| 0.5 + (i % 997) as f64 * 0.01).collect();
+    let ig_x: Vec<f64> = (0..n).map(|i| (i % 2003) as f64 * 0.01).collect();
+    let igamma_inputs = [
+        Value::vector_f64(&ig_a).unwrap(),
+        Value::vector_f64(&ig_x).unwrap(),
+    ];
+    let p = no_params();
+    c.bench_function("eval/betainc_1m_f64_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Betainc, &betainc_inputs, &p))
+    });
+    c.bench_function("eval/igamma_1m_f64_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Igamma, &igamma_inputs, &p))
+    });
+    c.bench_function("eval/igammac_1m_f64_vsjax", |b| {
+        b.iter(|| eval_primitive(Primitive::Igammac, &igamma_inputs, &p))
+    });
+}
+
 // 256k polygamma(2, x) over a dense f64 tensor: polygamma_approx is a heavy
 // series/asymptotic evaluation per element — compute-bound, threads.
 fn bench_polygamma_n2_256k_f64(c: &mut Criterion) {
@@ -8521,6 +8553,7 @@ criterion_group!(
     bench_xlogy_4m_f64_vec,
     bench_erf_1m_f64_vec,
     bench_special_fns_4m_vs_jax,
+    bench_iterative_special_fns_1m_vs_jax,
     bench_polygamma_n2_256k_f64,
     bench_igamma_256k_f64,
     bench_cbrt_1m_f64_vec,
