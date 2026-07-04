@@ -2,6 +2,39 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - KEEP (1.06-1.09x): radix-8 peel for smooth-composite per-row mixed-radix FFT; still a JAX loss (BlackThrush)
+
+New radix-8 butterfly in the per-row recursive mixed-radix kernel (`mixed_radix_ping`). This is the
+`frankenjax-murmw` smooth-composite gap (`eval/fft_batch_128x1000_complex128`, n=1000=2^3*5^3), which skips
+the pow2 / Bluestein / SoA paths and runs the per-row recursive kernel single-threaded (128_000 elems < the
+262_144 thread gate; threading regresses on this contended shared host — see prior murmw entries). The
+un-tried credible route flagged in the ledger was a length-specialized kernel; the flat/specialized iterative
+SoA family is a documented dead end (SoA transpose/digit-reversal dominates). This lever instead **peels a
+radix-8 stage ahead of radix-4**: for n=1000 the schedule becomes radix-8 -> radix-5 -> radix-5 -> radix-5
+(4 combine passes) instead of radix-4 -> radix-2 -> radix-5 x3 (5 passes), folding the intermediate radix-2
+twiddle stage into the eighth-root combine and cutting one full sweep over the work buffer. The radix-8
+butterfly is an even/odd split of two radix-4 DFTs (reusing the proven radix-4 op structure), with W_8^1,
+W_8^2=j, W_8^3 pulled from the shared roots table so the inverse sign stays exact.
+
+Same-worker RCH A/B (`ovh-a`), same-invocation interleaved min-of-9 (the only trustworthy FFT A/B), on the
+production per-row loop for the full 128x1000 batch, comparing `use8=false` (radix-4/prime split) vs
+`use8=true` (radix-8):
+
+- run 1: radix4 = **1.4319 ms**, radix8 = **1.3193 ms** = **1.09x faster**
+- run 2: radix4 = **1.1049 ms**, radix8 = **1.0399 ms** = **1.06x faster**
+- absolute ms drifts cross-invocation; the same-invocation ratio is stable at **1.06-1.09x**.
+
+This is a KEEP on the internal ratio only — it does NOT cross the JAX line. The prior measured JAX comparator
+for this row is ~0.230 ms (`fft_batch_128x1000_complex128`, 15.20x loss); the radix-8 kernel narrows the
+per-row loss by ~1.06-1.09x but the row remains a JAX loss. Closing it needs the per-row SoA+SIMD (Stockham)
+rewrite, which stays a multi-session swing.
+
+Correctness: `mixed_radix_radix8_matches_radix4_split_and_dft` compares radix-8 against the radix-4/prime
+split AND the direct DFT oracle for n in {8,24,40,200,1000,2000}, forward and inverse, to relative float
+tolerance (radix-8 is a different butterfly grouping, so tolerance-equal not bit-identical). Smooth-composite
+FFT is the tolerance path (golden digests are pow2-only), so no digest is affected. 79 fj-lax FFT lib tests
+and the fj-conformance `fft_oracle` suite pass with radix-8 wired as the production default.
+
 ## 2026-07-04 - KEEP (3.59x): direct SIMD rank-2 f64 3x3 maxpool; broad 7x7 variant rejected (ProudSalmon)
 
 Land-or-dig audit found no measured `.scratch` / `.worktrees` bench win absent from `main`, so this pass dug a

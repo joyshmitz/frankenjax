@@ -1219,6 +1219,7 @@ fn mixed_radix_ping(
     nn: usize,
     roots: &[(f64, f64)],
     big_n: usize,
+    use8: bool,
 ) {
     if nn == 1 {
         out[0] = x[offset];
@@ -1295,7 +1296,17 @@ fn mixed_radix_ping(
     // reach mixed_radix), so no golden digest is affected. FJ_MIXED_RADIX_NO4 forces
     // the pre-radix-4 (smallest-prime-only) split for the same-binary A/B (read once,
     // cached — the atomic load per node is far cheaper than the butterflies it gates).
-    let p = if !mixed_radix_no4() && nn.is_multiple_of(4) {
+    // Peel a factor of 8 ahead of radix-4 whenever `nn` allows: one radix-8 pass
+    // replaces a radix-4 + radix-2 pair, cutting one full sweep over the work
+    // buffers (the memory/loop-overhead floor) and folding the intermediate
+    // radix-2 twiddle stage into the eighth-root combine. Same tolerance path as
+    // radix-4 (smooth non-power-of-two lengths only; powers of two never reach
+    // mixed_radix), so no golden digest is affected. `use8=false` reverts to the
+    // radix-4/prime split for the same-binary A/B; the flag is threaded (not an
+    // env `OnceLock`) so one process can interleave both kernels.
+    let p = if use8 && nn.is_multiple_of(8) {
+        8
+    } else if !mixed_radix_no4() && nn.is_multiple_of(4) {
         4
     } else {
         smallest_prime_factor(nn)
@@ -1314,6 +1325,7 @@ fn mixed_radix_ping(
             m,
             roots,
             big_n,
+            use8,
         );
     }
 
@@ -1377,6 +1389,72 @@ fn mixed_radix_ping(
             out[m + s] = (t1.0 + jt3r, t1.1 + jt3i);
             out[m2 + s] = (t0.0 - t2.0, t0.1 - t2.1);
             out[m3 + s] = (t1.0 - jt3r, t1.1 - jt3i);
+        }
+        return;
+    }
+
+    // Specialized radix-8 butterfly (decimation-in-time). Twiddle the seven
+    // non-trivial sub-DFTs (u_r = W_nn^{r·s}·F_r[s]), then apply the length-8 DFT
+    // as an even/odd radix-2 split of two radix-4 DFTs — identical op structure to
+    // the proven radix-4 block above (E = 4pt DFT of the even inputs u0,u2,u4,u6;
+    // O = 4pt DFT of the odd inputs u1,u3,u5,u7), combined by
+    //   X[k]   = E[k] + W_8^k · O[k]
+    //   X[k+4] = E[k] − W_8^k · O[k]   (W_8^{k+4} = −W_8^k), k = 0..3.
+    // The rotations j = W_8^2 = roots[big_n/4], W_8^1 = roots[big_n/8], and
+    // W_8^3 = roots[3·big_n/8] all come from the shared roots table, so the inverse
+    // sign is exact (matching radix-2/3/4/5). Tolerance-equal to the direct DFT.
+    if p == 8 {
+        let (w1r, w1i) = roots[big_n / 8]; // W_8^1
+        let (jr, ji) = roots[big_n / 4]; // W_8^2 = W_4
+        let (w3r, w3i) = roots[3 * (big_n / 8)]; // W_8^3
+        let (m2, m3, m4, m5, m6, m7) = (2 * m, 3 * m, 4 * m, 5 * m, 6 * m, 7 * m);
+        for s in 0..m {
+            let u0 = scratch[s];
+            let tw = |r: usize, a: (f64, f64)| {
+                let (tr, ti) = roots[r * s * s_tw];
+                (tr * a.0 - ti * a.1, tr * a.1 + ti * a.0)
+            };
+            let u1 = tw(1, scratch[m + s]);
+            let u2 = tw(2, scratch[m2 + s]);
+            let u3 = tw(3, scratch[m3 + s]);
+            let u4 = tw(4, scratch[m4 + s]);
+            let u5 = tw(5, scratch[m5 + s]);
+            let u6 = tw(6, scratch[m6 + s]);
+            let u7 = tw(7, scratch[m7 + s]);
+            let cmul =
+                |x: (f64, f64), y: (f64, f64)| (x.0 * y.0 - x.1 * y.1, x.0 * y.1 + x.1 * y.0);
+            // Even 4pt DFT of (u0,u2,u4,u6) -> e0..e3.
+            let e_t0 = (u0.0 + u4.0, u0.1 + u4.1);
+            let e_t1 = (u0.0 - u4.0, u0.1 - u4.1);
+            let e_t2 = (u2.0 + u6.0, u2.1 + u6.1);
+            let e_t3 = (u2.0 - u6.0, u2.1 - u6.1);
+            let e_j = cmul((jr, ji), e_t3);
+            let e0 = (e_t0.0 + e_t2.0, e_t0.1 + e_t2.1);
+            let e1 = (e_t1.0 + e_j.0, e_t1.1 + e_j.1);
+            let e2 = (e_t0.0 - e_t2.0, e_t0.1 - e_t2.1);
+            let e3 = (e_t1.0 - e_j.0, e_t1.1 - e_j.1);
+            // Odd 4pt DFT of (u1,u3,u5,u7) -> o0..o3.
+            let o_t0 = (u1.0 + u5.0, u1.1 + u5.1);
+            let o_t1 = (u1.0 - u5.0, u1.1 - u5.1);
+            let o_t2 = (u3.0 + u7.0, u3.1 + u7.1);
+            let o_t3 = (u3.0 - u7.0, u3.1 - u7.1);
+            let o_j = cmul((jr, ji), o_t3);
+            let o0 = (o_t0.0 + o_t2.0, o_t0.1 + o_t2.1);
+            let o1 = (o_t1.0 + o_j.0, o_t1.1 + o_j.1);
+            let o2 = (o_t0.0 - o_t2.0, o_t0.1 - o_t2.1);
+            let o3 = (o_t1.0 - o_j.0, o_t1.1 - o_j.1);
+            // Combine with eighth-root twiddles.
+            let c1 = cmul((w1r, w1i), o1);
+            let c2 = cmul((jr, ji), o2);
+            let c3 = cmul((w3r, w3i), o3);
+            out[s] = (e0.0 + o0.0, e0.1 + o0.1);
+            out[m + s] = (e1.0 + c1.0, e1.1 + c1.1);
+            out[m2 + s] = (e2.0 + c2.0, e2.1 + c2.1);
+            out[m3 + s] = (e3.0 + c3.0, e3.1 + c3.1);
+            out[m4 + s] = (e0.0 - o0.0, e0.1 - o0.1);
+            out[m5 + s] = (e1.0 - c1.0, e1.1 - c1.1);
+            out[m6 + s] = (e2.0 - c2.0, e2.1 - c2.1);
+            out[m7 + s] = (e3.0 - c3.0, e3.1 - c3.1);
         }
         return;
     }
@@ -1494,12 +1572,25 @@ fn mixed_radix_into(
     output: &mut Vec<(f64, f64)>,
     scratch: &mut Vec<(f64, f64)>,
 ) {
+    // Production: radix-8 peel enabled (falls back to radix-4/prime when a length
+    // is not a multiple of 8). The `use8` variant exists for the same-binary A/B.
+    mixed_radix_into_use8(input, roots, inverse, output, scratch, true);
+}
+
+fn mixed_radix_into_use8(
+    input: &[(f64, f64)],
+    roots: &[(f64, f64)],
+    inverse: bool,
+    output: &mut Vec<(f64, f64)>,
+    scratch: &mut Vec<(f64, f64)>,
+    use8: bool,
+) {
     let n = input.len();
     output.clear();
     output.resize(n, (0.0, 0.0));
     scratch.clear();
     scratch.resize(n, (0.0, 0.0));
-    mixed_radix_ping(input, 0, 1, output, scratch, n, roots, n);
+    mixed_radix_ping(input, 0, 1, output, scratch, n, roots, n, use8);
     if inverse {
         let inv_n = 1.0 / (n as f64);
         for v in output.iter_mut() {
@@ -4594,6 +4685,103 @@ mod tests {
             o as f64 / 1e6,
             nn as f64 / 1e6,
             o as f64 / nn as f64,
+        );
+    }
+
+    /// Correctness: the radix-8 peel (`use8=true`, production) computes the same DFT
+    /// as the radix-4/prime split (`use8=false`) to floating tolerance, for smooth
+    /// lengths that are multiples of 8, both forward and inverse; forward is also
+    /// spot-checked against the direct DFT oracle. Radix-8 is a different butterfly
+    /// grouping (one 8-point stage vs a radix-4 + radix-2 pair), so it is
+    /// tolerance-equal, not bit-identical.
+    #[test]
+    fn mixed_radix_radix8_matches_radix4_split_and_dft() {
+        for &n in &[8usize, 24, 40, 200, 1000, 2000] {
+            let input: Vec<(f64, f64)> = (0..n)
+                .map(|i| {
+                    (
+                        (i as f64 * 0.017).sin() - 0.2,
+                        (i as f64 * 0.029).cos() * 0.6,
+                    )
+                })
+                .collect();
+            for &inverse in &[false, true] {
+                let roots = precompute_twiddles(n, inverse);
+                let (mut r8, mut s8) = (Vec::new(), Vec::new());
+                mixed_radix_into_use8(&input, &roots, inverse, &mut r8, &mut s8, true);
+                let (mut r4, mut s4) = (Vec::new(), Vec::new());
+                mixed_radix_into_use8(&input, &roots, inverse, &mut r4, &mut s4, false);
+                assert_eq!(r8.len(), n);
+                for k in 0..n {
+                    let (a, b) = (r8[k], r4[k]);
+                    let tol = 1e-8 * a.0.abs().max(a.1.abs()).max(1.0);
+                    assert!(
+                        (a.0 - b.0).abs() <= tol && (a.1 - b.1).abs() <= tol,
+                        "radix-8 != radix-4 split (n={n} inv={inverse} k={k}): {a:?} vs {b:?}"
+                    );
+                }
+                if !inverse {
+                    let want = dft_1d(&input);
+                    for k in 0..n {
+                        let (a, b) = (r8[k], want[k]);
+                        let tol = 1e-7 * b.0.abs().max(b.1.abs()).max(1.0);
+                        assert!(
+                            (a.0 - b.0).abs() <= tol && (a.1 - b.1).abs() <= tol,
+                            "radix-8 != DFT oracle (n={n} k={k}): {a:?} vs {b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A/B HARNESS for the radix-8 peel on the SMOOTH-COMPOSITE per-row path — the
+    /// production route for n=1000=2^3*5^3, which skips pow2/Bluestein/SoA and runs
+    /// per-row recursive mixed-radix single-threaded (128_000 elems < the 262_144
+    /// thread gate). OLD = radix-4/prime split (`use8=false`); NEW = radix-8 peel
+    /// (`use8=true`). Times the full 128-row batch per-row loop (the exact production
+    /// inner loop). Interleaved min-of-9 — the only trustworthy FFT A/B. KEEP only if
+    /// radix-8 < radix-4 split in the same binary.
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_mixed_radix_radix8_vs_radix4_per_row() {
+        let (rows, n) = (128usize, 1000usize);
+        let inverse = false;
+        let roots = precompute_twiddles(n, inverse);
+        let elements: Vec<(f64, f64)> = (0..rows * n)
+            .map(|i| {
+                (
+                    (i as f64 * 0.017).sin() - 0.2,
+                    (i as f64 * 0.029).cos() * 0.6,
+                )
+            })
+            .collect();
+        let run = |use8: bool| -> (u64, u64) {
+            let (mut out, mut scratch) = (Vec::new(), Vec::new());
+            let mut chk = 0u64;
+            let t0 = std::time::Instant::now();
+            for b in 0..rows {
+                let row = &elements[b * n..b * n + n];
+                mixed_radix_into_use8(row, &roots, inverse, &mut out, &mut scratch, use8);
+                chk ^= out[0].0.to_bits() ^ out[n / 2].1.to_bits();
+            }
+            (t0.elapsed().as_nanos() as u64, chk)
+        };
+        let (mut o, mut nw) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (a, ca) = run(false);
+            let (b, cb) = run(true);
+            chk ^= ca ^ cb;
+            o = o.min(a);
+            nw = nw.min(b);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[mixed-radix radix8 vs radix4 per-row {rows}x{n}] radix4={:.4}ms radix8={:.4}ms ratio={:.2}x (min of 9 interleaved)",
+            o as f64 / 1e6,
+            nw as f64 / 1e6,
+            o as f64 / nw as f64,
         );
     }
 
