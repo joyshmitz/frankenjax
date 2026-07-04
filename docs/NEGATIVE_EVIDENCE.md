@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - CLOSEOUT: random_uniform 4M f64 is 9.46x faster than JAX/XLA-CPU (BlackThrush)
+
+Fresh strict-remote RCH Criterion proof for a different primitive family from the iterative special-function
+pass: `random_uniform` / Threefry uniform generation, worker `ovh-a`.
+
+- `RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 rch --no-self-healing exec -- cargo bench -p fj-lax --bench lax_baseline random/uniform_4m_f64_vsjax -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`
+- `random/uniform_4m_f64_vsjax`: fj-lax **6.4048ms** midpoint (`[6.2777ms, 6.5532ms]`) vs JAX
+  **60.6ms** = **9.46x FASTER**
+
+The retained per-crate benchmark already covered this primitive, so this is an evidence-only closeout rather
+than a code-path change. JAX's CPU Threefry uniform path remains a clean win surface for fj-lax's threaded
+counter-based generator; the slower normal/randint transform rows are separate RNG subcases and are not claimed
+by this entry.
+
 ## 2026-07-04 - CLOSEOUT: sort_key_val remains a 40x JAX/XLA-CPU win; s2yc8 closed (ProudSalmon)
 
 Fresh strict-remote RCH release proof for `frankenjax-sortkeyval-argsort-permute-s2yc8` on worker
