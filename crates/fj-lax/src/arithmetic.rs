@@ -10999,6 +10999,67 @@ pub(crate) fn eval_fma(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     )?))
 }
 
+/// Threaded f64x8 SIMD `clamp(lo, x, hi)` for scalar bounds (`lof`/`hif` finite-or-±inf, NOT
+/// NaN — the caller guards). Replaces the per-index `threaded_index_fill_into` closure (which
+/// does NOT autovectorize — cross-slice bounds-checked index + a per-element NaN branch) with a
+/// slice-chunk map over `Simd<f64,8>` comparison/select: `lower = if x<lo {lo} else {x}` then
+/// `if lower>hi {hi} else {lower}`, and NaN-`x` lanes → canonical NaN. BIT-IDENTICAL to the
+/// scalar `clamp_f64` (min/max are exact selections, no arithmetic; NaN normalizes to canonical).
+fn clamp_f64_scalar_bounds_dense_simd(xs: &[f64], lof: f64, hif: f64) -> Vec<f64> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    let n = xs.len();
+    let mut out = vec![0.0f64; n];
+    let block = move |xs: &[f64], out: &mut [f64]| {
+        let lo = F::splat(lof);
+        let hi = F::splat(hif);
+        let nan = F::splat(f64::NAN);
+        let m = xs.len();
+        let mut i = 0usize;
+        while i + 8 <= m {
+            let x = F::from_slice(&xs[i..i + 8]);
+            let lower = x.simd_lt(lo).select(lo, x);
+            let clamped = lower.simd_gt(hi).select(hi, lower);
+            let r = x.is_nan().select(nan, clamped);
+            r.copy_to_slice(&mut out[i..i + 8]);
+            i += 8;
+        }
+        while i < m {
+            let xv = xs[i];
+            out[i] = if xv.is_nan() {
+                f64::NAN
+            } else {
+                let lower = if xv < lof { lof } else { xv };
+                if lower > hif { hif } else { lower }
+            };
+            i += 1;
+        }
+    };
+    let threads = work_scaled_threads(n);
+    if n < CHEAP_BINARY_PARALLEL_MIN || threads <= 1 {
+        block(xs, &mut out);
+        return out;
+    }
+    let chunk = n.div_ceil(threads).next_multiple_of(8);
+    std::thread::scope(|scope| {
+        let mut o_rest = out.as_mut_slice();
+        let mut x0 = 0usize;
+        while x0 < n {
+            let cnt = chunk.min(n - x0);
+            let (oblk, otail) = o_rest.split_at_mut(cnt);
+            o_rest = otail;
+            let sblk = &xs[x0..x0 + cnt];
+            x0 += cnt;
+            let b = &block;
+            scope.spawn(move || b(sblk, oblk));
+        }
+    });
+    out
+}
+
 /// Clamp: clamp(lo, x, hi) = min(max(lo, x), hi).
 /// Supports scalar and tensor inputs with broadcasting.
 pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -11135,12 +11196,13 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         // normalizes any-NaN to canonical NaN (so `Literal::from_f64` and the
         // dense store agree bit-for-bit), and `new_f64_values` keeps the f64 bits.
         if let Some(xs) = x.elements.as_f64_slice() {
-            let n = xs.len();
-            if n >= CHEAP_BINARY_PARALLEL_MIN && work_scaled_threads(n) > 1 {
-                let mut out = vec![0.0f64; n];
-                threaded_index_fill_into(&mut out, work_scaled_threads(n), |i| {
-                    clamp_f64(lof, xs[i], hif)
-                });
+            // Threaded f64x8 SIMD comparison/select clamp — hits memory bandwidth where the
+            // old per-index threaded fill stalled (no autovec + per-element NaN branch).
+            // Bit-identical to the scalar `clamp_f64`. When lo/hi is NaN every output is NaN
+            // (the SIMD kernel assumes non-NaN bounds), so route that to the scalar map.
+            // FJ_CLAMP_SCALAR forces the pre-SIMD scalar map (same-binary A/B hook).
+            if !lof.is_nan() && !hif.is_nan() && std::env::var_os("FJ_CLAMP_SCALAR").is_none() {
+                let out = clamp_f64_scalar_bounds_dense_simd(xs, lof, hif);
                 return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
                     x.shape.clone(),
                     out,
@@ -29952,6 +30014,105 @@ mod tests {
         println!(
             "fj-lax clamp f64 16M scalar-bounds: {:.3}ms | JAX=18.58ms",
             b * 1e3
+        );
+    }
+
+    #[test]
+    fn clamp_f64_simd_matches_scalar() {
+        // The f64x8 SIMD clamp must equal the scalar clamp_f64 bit-for-bit over: below/in/above
+        // bounds, ±inf x, ±inf bounds, ±0, NaN x (→ canonical NaN), dup extrema, and a scalar
+        // tail (len not a multiple of 8). Bounds are non-NaN (the SIMD path's contract).
+        let clamp_ref = |lof: f64, xv: f64, hif: f64| -> f64 {
+            if xv.is_nan() {
+                f64::NAN
+            } else {
+                let lower = if xv < lof { lof } else { xv };
+                if lower > hif { hif } else { lower }
+            }
+        };
+        for (lof, hif) in [
+            (-0.5f64, 0.5f64),
+            (0.0, 10.0),
+            (f64::NEG_INFINITY, 1.0),
+            (-1.0, f64::INFINITY),
+            (2.0, 2.0),
+        ] {
+            let xs: Vec<f64> = [
+                -1e9,
+                -0.5,
+                -0.0,
+                0.0,
+                0.25,
+                0.5,
+                1e9,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                f64::from_bits(0xfff8_0000_0000_0001),
+                3.0,
+                2.0,
+                -2.0,
+            ]
+            .into_iter()
+            .cycle()
+            .take(8 * 3 + 5) // spans SIMD blocks + a 5-element scalar tail
+            .collect();
+            let got = clamp_f64_scalar_bounds_dense_simd(&xs, lof, hif);
+            for (i, &xv) in xs.iter().enumerate() {
+                let want = clamp_ref(lof, xv, hif);
+                assert_eq!(
+                    got[i].to_bits(),
+                    want.to_bits(),
+                    "clamp simd bits lo={lof} hi={hif} x={xv}: got={} want={}",
+                    got[i],
+                    want
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_clamp_f64_simd_vs_index_fill() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xs: Vec<f64> = (0..n).map(|i| (i % 9973) as f64 * 0.001 - 5.0).collect();
+        let (lof, hif) = (-0.5f64, 0.5f64);
+        // OLD = the pre-SIMD threaded per-index fill (autovec-blocked closure).
+        let old = || {
+            let mut out = vec![0.0f64; n];
+            threaded_index_fill_into(&mut out, work_scaled_threads(n), |i| {
+                let xv = xs[i];
+                if xv.is_nan() {
+                    f64::NAN
+                } else {
+                    let lower = if xv < lof { lof } else { xv };
+                    if lower > hif { hif } else { lower }
+                }
+            });
+            std::hint::black_box(out[123]);
+        };
+        let new = || {
+            let out = clamp_f64_scalar_bounds_dense_simd(&xs, lof, hif);
+            std::hint::black_box(out[123]);
+        };
+        old();
+        new();
+        let mut bo = f64::MAX;
+        let mut bn = f64::MAX;
+        for _ in 0..8 {
+            let s = Instant::now();
+            old();
+            bo = bo.min(s.elapsed().as_secs_f64());
+            let s = Instant::now();
+            new();
+            bn = bn.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "clamp f64 16M: index-fill={:.3}ms simd={:.3}ms ratio={:.2}x | JAX=18.58ms",
+            bo * 1e3,
+            bn * 1e3,
+            bo / bn
         );
     }
 

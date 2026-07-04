@@ -2,6 +2,36 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 1.22x: clamp f64 scalar-bounds threaded f64x8 SIMD (comparison/select) — clamp 1.72x→1.28x vs JAX, bit-identical (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_clamp`
+  `clamp_f64_scalar_bounds`). Remote via rch (`CARGO_TARGET_DIR=.../blackthrush`),
+  `--test-threads=1` isolated.
+- GAP (from this session's measured sweep): `clamp` f64 16M scalar-bounds was **1.72x** slower
+  than JAX (32.0ms vs 18.58ms). The f64 fast path WAS threaded but via
+  `threaded_index_fill_into(&mut out, .., |i| clamp_f64(lof, xs[i], hif))` — a per-index
+  bounds-checked closure that does NOT autovectorize (same autovec-block as the bitwise-hoist
+  finding [[project_hoist_op_match_vectorize_lever]]), plus a per-element `is_nan` branch. So it
+  threaded but ran scalar → ~8-9 GB/s while JAX hit the ~14 GB/s DRAM floor.
+- LEVER: `clamp_f64_scalar_bounds_dense_simd` — a threaded SLICE-CHUNK map over `Simd<f64,8>`
+  comparison/select: `lower = x.simd_lt(lo).select(lo, x)`, `clamped = lower.simd_gt(hi)
+  .select(hi, lower)`, then NaN-`x` lanes → canonical NaN via `x.is_nan().select`. Lowers to
+  vcmppd+vblendvpd, 8 lanes/instr, reaching bandwidth. NaN bounds (all-NaN output) route to the
+  scalar map (the SIMD kernel's contract is non-NaN bounds). `FJ_CLAMP_SCALAR` A/B hook.
+- BIT-IDENTICAL to the scalar `clamp_f64` (min/max are exact selections, no arithmetic; NaN-x
+  normalizes to canonical NaN exactly as the scalar path's `from_f64`). Verified by
+  `clamp_f64_simd_matches_scalar` (bit-for-bit over below/in/above bounds, ±inf x, ±inf bounds,
+  ±0, NaN-x, signed-NaN payload, dup extrema, and a 5-element scalar tail across 5 bound pairs).
+  28 clamp tests GREEN.
+- MEASURED (rch, same-invocation min-of-8 A/B, `--test-threads=1`, 16M f64,
+  `bench_clamp_f64_simd_vs_index_fill`): **index-fill 28.984ms → simd 23.747ms = 1.22x.**
+  clamp vs JAX narrows 1.72x → ~1.28x (23.7/18.58 ≈ 12.9 GB/s, near JAX's ~13.8). EV: KEEP
+  (bit-identical, never a regression). FOLLOW-UP: the f32 scalar-bounds path
+  (`clamp_f32_scalar_bounds`, JAX default dtype) has the SAME index-fill pattern — an f32x8/x16
+  sibling is the next clean win. Note `select`/`is_nan` need `use std::simd::{Select, num::SimdFloat}`
+  (trait location drifts across nightlies, cf. atan2_f64x8).
+
+
 ## 2026-07-04 - NO-SHIP 1.05x: complex_exp SoA SIMD (sincos vectorized, e^re scalar) — cexp is exp-BOUND, dropped (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_exp` complex branch).
