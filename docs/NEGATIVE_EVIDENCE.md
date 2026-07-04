@@ -24,6 +24,67 @@ restored to the original clone path; do not retry the dense-index borrow lever f
 fresh profile shows the clone as a top local cost. JAX residual remains the prior **1.38x slower** marker; this
 variant does not narrow it.
 
+## 2026-07-04 - NO-SHIP (1.02x local fallback): dense f64 reciprocal SIMD inner loop is alloc-bound noise (ProudSalmon)
+
+Dug a different primitive from the recent erf/FFT/sumpool work: `Primitive::Reciprocal` on the existing
+`alloc_ceiling` per-crate bench. The candidate was a narrow direct `std::simd::Simd<f64, 8>` reciprocal kernel
+behind the existing dense unary SIMD driver, with an `FJ_RECIPROCAL_SCALAR` same-binary hook matching the local
+`FJ_ATANH_SCALAR` / `FJ_RSQRT_SCALAR` A/B pattern. Correctness was straightforward (lane-independent
+`1.0 / x`, no reductions), but the performance signal did not clear the keep gate and the production hunk was
+dropped before landing.
+
+Per-crate bench command requested first:
+
+```bash
+AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-proudsalmon \
+  rch exec -- cargo bench --release -p fj-lax --bench alloc_ceiling
+```
+
+Cargo rejected `cargo bench --release` on this toolchain (`unexpected argument '--release'`), so the RCH runs
+used the supported release-profile form:
+
+```bash
+AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-proudsalmon \
+  rch exec -- cargo bench --profile release -p fj-lax --bench alloc_ceiling
+```
+
+RCH was not usable as a same-worker proof source for this lever:
+
+- baseline selected `vmi1167313`: `reciprocal 16M f64 fresh-alloc=40.396ms`
+  (`neg fresh=44.033ms`, `reused=22.415ms`, alloc ratio `1.96x`).
+- candidate selected `vmi1149989`: `reciprocal 16M f64 fresh-alloc=18.254ms`
+  (`neg fresh=22.383ms`, `reused=8.159ms`, alloc ratio `2.74x`).
+- the ~2x shift in the `Neg` control row shows those two RCH runs are worker-speed/load differences, not a
+  reciprocal proof.
+- `RCH_WORKER=vmi1149989` was ignored by the scheduler; the old-path run landed on `vmi1227854` and then
+  exited `143` before the bench printed results.
+
+Local fallback, same machine / same target dir / same bench executable, sequential old-path vs candidate:
+
+```bash
+AGENT_NAME=ProudSalmon FJ_RECIPROCAL_SCALAR=1 \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-proudsalmon \
+  cargo bench --profile release -p fj-lax --bench alloc_ceiling
+# reciprocal 16M f64 fresh-alloc=20.480ms
+
+AGENT_NAME=ProudSalmon \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-proudsalmon \
+  cargo bench --profile release -p fj-lax --bench alloc_ceiling
+# reciprocal 16M f64 fresh-alloc=19.982ms
+```
+
+Ratio vs the original scalar-map path: **20.480 / 19.982 = 1.02x**. Against the recorded JAX reference in this
+bench comment (~14ms for reciprocal 16M f64), the candidate would still be **~1.43x slower than JAX**. A later
+parallel confirmation pair was contaminated by Cargo locks and showed candidate worse (`21.391ms` old-path vs
+`24.883ms` candidate), so it is not used as evidence except to reinforce that the effect is noise-level.
+
+Conclusion: no production code retained. The current dense f64 reciprocal path is already dominated by fresh
+output allocation / page-fault cost and memory traffic, not scalar division dispatch. The real lever remains the
+architectural eval-model buffer-reuse work called out by `alloc_ceiling`; micro-SIMD inside the reciprocal loop
+does not materially narrow the JAX gap.
+
 ## 2026-07-04 - KEEP (1.86x): SIMD-exp tail branch for dense f64 erf; narrows the JAX loss (BlackThrush)
 
 Dug the erf gap (a real dispatch-path `Primitive::Erf` JAX loss, ~4.6-15x depending on size). Fresh code read
