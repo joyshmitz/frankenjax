@@ -2,6 +2,34 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - NO-SHIP 0.61x: radix-4 SoA butterfly inv-branch hoist — the branch is FREE, ×sgn adds multiplies (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. File: `fft.rs` (`soa_radix4_butterfly_stages`). Remote
+  via rch (`CARGO_TARGET_DIR=.../blackthrush`), `--test-threads=1`.
+- CONTEXT (re-measured biggest gap): batched 2D FFT `[1024,1024]` axis1 (`bench_fft_2d_batched_vs_jax`)
+  = **fj 6.5-8.0ms vs JAX 0.58ms ≈ 11x** — the largest measured gap left (elementwise is 1.5-2x;
+  single-row 2^20 is at parity, b661e808). 1024=4^5 → the radix-4 SoA tiled+threaded path.
+- HYPOTHESIS: the innermost `for lane in 0..w` loop (w=8, the vectorizable SoA tile stride) has a
+  loop-invariant `if inv` branch (forward vs inverse X1/X3 sign) — suspected an autovec blocker.
+  Replaced it with a hoisted `sgn = ∓1.0` multiplier on the ±i·s3 cross terms (bit-identical,
+  ×±1.0 exact; radix4_soa_matches_dft_oracle GREEN).
+- MEASURED (rch, SAME-BINARY interleaved min-of-9, `--test-threads=1`, 8×1024 butterfly,
+  `bench_radix4_butterfly_hoist_vs_branch`): **branch 0.0585ms vs hoisted 0.0962ms = 0.61x (1.6x
+  SLOWER).** REVERTED (fft.rs back to HEAD; bench removed). The initial cross-build read
+  (6.5→8.0ms) was NOT noise — it was the real regression, confirmed same-binary.
+- ROOT CAUSE (the reusable lesson): `if inv` is a perfectly-predicted loop-invariant branch — the
+  compiler already unswitches/hoists it, so it costs ~nothing. Forcing it into arithmetic with a
+  `×sgn` ADDS 2 real f64 multiplies per lane (sgn·s3i, sgn·s3r) to the hot loop → slower. A
+  branch that is loop-invariant AND perfectly predicted is cheaper than the arithmetic that would
+  replace it; do NOT "branchless-ify" a predicted invariant branch. (Contrast the clamp/select
+  index-fill case, where the blocker was the per-index bounds-checked CLOSURE, not a branch.)
+- FFT FRONTIER CONFIRMED (do not re-dig contained butterfly levers): the radix-4 SoA butterfly is
+  already efficient; the 11x batched gap is pocketfft's split-radix + SIMD + FMA, which is the
+  standing multi-session lever + the policy-blocked `+fma` flag ([[project_fma_lever_policy_blocked]],
+  [[project_fft_jax_loss_frontier]]). The contained-lever FFT vein (transpose order, twiddle-free
+  j==0, radix-4/8, threading, and now inv-branch hoist) is exhausted — all no-ships.
+
+
 ## 2026-07-04 - WIN 1.16x: clamp f32 scalar-bounds threaded f32x16 SIMD — bit-identical (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. File: `arithmetic.rs` (`eval_clamp`
