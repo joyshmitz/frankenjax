@@ -1162,6 +1162,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_zscore_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_cosine_similarity_2d_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -3078,6 +3082,145 @@ fn try_eval_top_level_rms_2d_f64(
         .map(|value| vec![value])
         .map_err(EvalError::InvalidTensor)
         .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the row-wise z-score standardize `(x − μ) / σ` (NO epsilon),
+/// `σ = sqrt(mean((x-μ)²))` (`scipy.stats.zscore(x, axis=-1, ddof=0)` / per-row StandardScaler): the
+/// 10-equation graph `ReduceSum → Div(mean) → BroadcastInDim → Sub → Mul(square) → ReduceSum →
+/// Div(var) → Sqrt → BroadcastInDim → Div`, one f64 [rows,cols] input, one [rows,cols] output
+/// (rank-PRESERVING). NO transcendentals — the centered-moment analog of `l2_normalize`. The general
+/// fuser cannot fuse it (the two reductions break the elementwise fuser), so the decomposed path
+/// materializes the full [rows,cols] centered / squared / broadcast intermediates plus the reduction
+/// Vecs. Fused via the row-parallel `zscore_2d`, whose index-order mean+variance, `f64::sqrt`, and
+/// per-element TRUE division match the graph bit-for-bit (the `Div` primitive — NOT reciprocal-
+/// multiply; distinct from `rms_norm`'s `Rsqrt×Mul`). Both `Div(·,n)` divisors must equal `cols` (as
+/// f64) and both broadcasts must restore exactly `rows,cols`; finite dense rank-2 f64 only.
+fn try_eval_top_level_zscore_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 10
+        || args.len() != 1
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let out = jaxpr.outvars[0];
+    let [
+        sum1_eq,
+        mean_eq,
+        mean_bcast_eq,
+        sub_eq,
+        sq_eq,
+        sum2_eq,
+        var_eq,
+        sqrt_eq,
+        std_bcast_eq,
+        div_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    // mean = ReduceSum(x, axis=1) / n, broadcast to [rows,cols]
+    let s1 = single_output_for_param_primitive(sum1_eq, Primitive::ReduceSum)?;
+    if sum1_eq.inputs.as_slice() != [Atom::Var(x)] || !axis1_reduce_params(&sum1_eq.params) {
+        return None;
+    }
+    let mean = single_output_for_primitive(mean_eq, Primitive::Div)?;
+    let [Atom::Var(mean_num), mean_div] = mean_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *mean_num != s1 {
+        return None;
+    }
+    let mean_b = single_output_for_param_primitive(mean_bcast_eq, Primitive::BroadcastInDim)?;
+    if mean_bcast_eq.inputs.as_slice() != [Atom::Var(mean)]
+        || !rank2_axis0_broadcast_params(&mean_bcast_eq.params)
+    {
+        return None;
+    }
+    // centered = x - mean_b, sq = centered * centered
+    let centered = single_output_for_primitive(sub_eq, Primitive::Sub)?;
+    if sub_eq.inputs.as_slice() != [Atom::Var(x), Atom::Var(mean_b)] {
+        return None;
+    }
+    let sq = single_output_for_primitive(sq_eq, Primitive::Mul)?;
+    if sq_eq.inputs.as_slice() != [Atom::Var(centered), Atom::Var(centered)] {
+        return None;
+    }
+    // var = ReduceSum(sq, axis=1) / n
+    let s2 = single_output_for_param_primitive(sum2_eq, Primitive::ReduceSum)?;
+    if sum2_eq.inputs.as_slice() != [Atom::Var(sq)] || !axis1_reduce_params(&sum2_eq.params) {
+        return None;
+    }
+    let var = single_output_for_primitive(var_eq, Primitive::Div)?;
+    let [Atom::Var(var_num), var_div] = var_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *var_num != s2 {
+        return None;
+    }
+    // std = Sqrt(var), broadcast to [rows,cols]
+    let std = single_output_for_primitive(sqrt_eq, Primitive::Sqrt)?;
+    if sqrt_eq.inputs.as_slice() != [Atom::Var(var)] {
+        return None;
+    }
+    let std_b = single_output_for_param_primitive(std_bcast_eq, Primitive::BroadcastInDim)?;
+    if std_bcast_eq.inputs.as_slice() != [Atom::Var(std)]
+        || !rank2_axis0_broadcast_params(&std_bcast_eq.params)
+    {
+        return None;
+    }
+    // out = Div(centered, std_b) (non-commutative → numerator = centered)
+    let quotient = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if quotient != out || div_eq.inputs.as_slice() != [Atom::Var(centered), Atom::Var(std_b)] {
+        return None;
+    }
+
+    let Value::Tensor(input) = &args[0] else {
+        return None;
+    };
+    if input.dtype != DType::F64 || input.shape.dims.len() != 2 {
+        return None;
+    }
+    let rows = input.shape.dims[0] as usize;
+    let cols = input.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    // Both divisors must be exactly the row length `n = cols` (as f64), matching `zscore_row_into`.
+    let n_bits = (cols as f64).to_bits();
+    if f64_literal(mean_div)?.to_bits() != n_bits || f64_literal(var_div)?.to_bits() != n_bits {
+        return None;
+    }
+    let expected_shape = format!("{rows},{cols}");
+    if mean_bcast_eq.params.get("shape").map(String::as_str) != Some(expected_shape.as_str())
+        || std_bcast_eq.params.get("shape").map(String::as_str) != Some(expected_shape.as_str())
+    {
+        return None;
+    }
+
+    let values = input.elements.as_f64_slice()?;
+    if !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::zscore_2d(values, rows, cols);
+    Some(
+        TensorValue::new_f64_values(input.shape.clone(), output)
+            .map(Value::Tensor)
+            .map(|value| vec![value])
+            .map_err(EvalError::InvalidTensor)
+            .map_err(InterpreterError::Primitive),
     )
 }
 
@@ -23124,6 +23267,153 @@ mod tests {
             .expect("nonfinite l2_normalize falls through");
         let through_generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite])
             .expect("generic nonfinite l2_normalize");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_zscore_2d_jaxpr(rows: usize, cols: usize) -> Jaxpr {
+        let x = VarId(1);
+        let s1 = VarId(2);
+        let mean = VarId(3);
+        let mean_b = VarId(4);
+        let centered = VarId(5);
+        let sq = VarId(6);
+        let s2 = VarId(7);
+        let var = VarId(8);
+        let std = VarId(9);
+        let std_b = VarId(10);
+        let out = VarId(11);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        let bcast = BTreeMap::from([
+            ("shape".to_owned(), format!("{rows},{cols}")),
+            ("broadcast_dimensions".to_owned(), "0".to_owned()),
+        ]);
+        let n = Literal::from_f64(cols as f64);
+        Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![s1],
+                    params: reduce_axis1.clone(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(s1), Atom::Lit(n)],
+                    outputs: smallvec![mean],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::BroadcastInDim,
+                    inputs: smallvec![Atom::Var(mean)],
+                    outputs: smallvec![mean_b],
+                    params: bcast.clone(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(x), Atom::Var(mean_b)],
+                    outputs: smallvec![centered],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(centered), Atom::Var(centered)],
+                    outputs: smallvec![sq],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(sq)],
+                    outputs: smallvec![s2],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(s2), Atom::Lit(n)],
+                    outputs: smallvec![var],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sqrt,
+                    inputs: smallvec![Atom::Var(var)],
+                    outputs: smallvec![std],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::BroadcastInDim,
+                    inputs: smallvec![Atom::Var(std)],
+                    outputs: smallvec![std_b],
+                    params: bcast,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Div,
+                    inputs: smallvec![Atom::Var(centered), Atom::Var(std_b)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_zscore_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.39).sin() * 3.5 - ((idx % cols) as f64) * 0.5 + 0.3)
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .expect("dense f64 input"),
+        );
+        let jaxpr = make_zscore_2d_jaxpr(rows, cols);
+
+        let fast = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).expect("fast zscore");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[input]).expect("generic zscore");
+        assert_eq!(fast, generic);
+
+        let mut nonfinite_data: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        nonfinite_data[cols + 1] = f64::NAN;
+        let nonfinite = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                nonfinite_data,
+            )
+            .expect("dense nonfinite f64 input"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, std::slice::from_ref(&nonfinite))
+            .expect("nonfinite zscore falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite zscore");
         assert_eq!(through_eval, through_generic);
     }
 

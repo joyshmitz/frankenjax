@@ -2,6 +2,47 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-04 - WIN 7.24x vs ORIG: row-wise z-score standardize recognized as a fused (row-parallel) RANK-PRESERVING interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ row-parallel `fj-lax::nn::zscore_2d`). Confirms the
+  producer-fed-reduction thesis (right after the ptp NO-SHIP that delineated the boundary): a
+  full-output op whose decomposed path materializes MANY [rows,cols] intermediates fuses BIG. Row-wise
+  z-score standardize `(x − μ) / σ`, `σ = sqrt(mean((x-μ)²))`, NO epsilon
+  (`scipy.stats.zscore(x, axis=-1, ddof=0)` / per-row sklearn StandardScaler). A 10-equation graph
+  `ReduceSum → Div(mean) → BroadcastInDim → Sub → Mul(square) → ReduceSum → Div(var) → Sqrt →
+  BroadcastInDim → Div`, one f64 [rows,cols] input → one [rows,cols] output (rank-PRESERVING). NO
+  transcendentals — the centered-moment analog of `l2_normalize`. The general fuser cannot fuse it (the
+  two reductions break the elementwise fuser), so the decomposed path materializes FOUR full [rows,cols]
+  intermediates (mean broadcast, centered, squared, std broadcast) plus two reduction Vecs. Worktree
+  audit: HEAD==origin/main (my ptp-noship tip 9c63599a), no unlanded win to land. DISTINCT from
+  `jax.nn.standardize` (1D, WITH epsilon `sqrt(var+eps)`), from `rms_norm_2d` (uncentered
+  `x·rsqrt(mean(x²)+eps)`), and from `layer_norm` (adds affine gamma/beta).
+- LEVER: a top-level 1-input superinstruction for the exact 10-eq finite dense f64 z-score graph,
+  computed via the row-parallel `zscore_2d`. BIT-IDENTICAL: `zscore_row_into` does an index-order sum
+  for the mean, an index-order sum of squared centered deviations for the variance (both `/n`),
+  `f64::sqrt` (= the `Sqrt` primitive), then a per-element TRUE division `(x[i]-μ)/σ` — matching the
+  `Div` primitive, NOT reciprocal-multiply. The recomputed `x[i]-μ` is bit-identical to the graph's
+  shared `centered` value (same scalar μ). Both `Div(·,n)` divisors must equal `cols` (as f64), both
+  broadcasts restore `rows,cols`; finite dense rank-2 f64 only, else falls through.
+- MEASURED per-crate (`rch exec`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cc`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed zscore_2d
+  -m 3 -s 20`, 4096x1024, x=softmax_input):
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/zscore_2d/orig_decomposed_4096x1024` | 77.226 ms |
+  | `compiled_dispatch/zscore_2d/fast_eval_jaxpr_4096x1024` | 10.671 ms |
+
+  Ratio vs ORIG: **0.1382x time / 7.24x faster** (worst-case CI 6.66x, best 7.96x; robustly ≥2x).
+  ~2x l2_normalize's full-output multiple (3.80x) because the decomposed baseline is much heavier
+  (77 ms — 4 materialized [rows,cols] intermediates vs l2_normalize's 2), so there is much more for
+  the fused kernel to eliminate; the fused path is 10.7 ms.
+- VALIDATION: `eval_top_level_zscore_2d_f64_matches_generic_and_preserves_edges` GREEN (fused==generic
+  bit-for-bit on mixed-sign random f64; nonfinite falls through to the generic path); fj-lax `nn::`
+  61/61 GREEN. Pre-existing INDEPENDENT RED (NOT this change): fj-interpreters
+  `scalar_arena_transcendentals_bit_identical_to_generic` on `Cbrt(-5)` — this diff touches no
+  cbrt/arena code.
+
 ## 2026-07-04 - NO-SHIP 0.48-0.65x: row-wise peak-to-peak (ptp = max−min) as an interpreter superinstruction REGRESSES — delineates the fusion-vein boundary (BlackThrush)
 
 - Agent: BlackThrush. Attempted extension of the interpreter-superinstruction vein to the first
