@@ -323,6 +323,15 @@ pub fn softplus_direct(x: &[f64]) -> Vec<f64> {
     threaded_f64_map(x, |v| (1.0 + v.exp()).ln())
 }
 
+/// Mish computed in the DIRECT graph grouping `x * tanh(log(1 + exp(x)))` (the naive
+/// `Exp → Add(1) → Log → Tanh → Mul(x, ·)` graph), NOT the stable [`mish`] helper's
+/// `softplus_scalar` grouping. Used by the interpreter Mish superinstruction, where bit-identity
+/// to the decomposed graph matters more than the standalone eager function's stable formulation.
+#[must_use]
+pub fn mish_direct(x: &[f64]) -> Vec<f64> {
+    threaded_f64_map(x, |v| v * ((1.0 + v.exp()).ln()).tanh())
+}
+
 /// Compute log-sum-exp in a numerically stable way.
 ///
 /// Matches `jax.scipy.special.logsumexp(x)`.

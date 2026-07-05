@@ -2,6 +2,39 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-05 - WIN 1.72x vs ORIG: direct Mish graph recognized as a fused interpreter superinstruction (DustyDog)
+
+- Agent: DustyDog. Crate: `fj-interpreters` (+ `fj-lax::nn::mish_direct`).
+  Worktree audit found no qualifying unlanded `.scratch/.worktrees` measured win missing from
+  `main`; the only live ahead worktree was an out-of-scope WIP QR/SVD candidate without a ledgered
+  measured win. This turn dug a distinct activation graph, not another row-wise reduction metric:
+  dense finite f64 Mish `x * tanh(log(1 + exp(x)))`.
+- LEVER: top-level interpreter recognizer matches the exact decomposed graph
+  `Exp(x) -> Add(1, exp) -> Log -> Tanh -> Mul(x, tanh)` and dispatches to one threaded
+  `mish_direct` pass. This avoids four materialized full-tensor intermediates. The direct helper
+  intentionally uses the graph grouping `(1.0 + v.exp()).ln().tanh()` rather than the stable eager
+  `mish` grouping so the fast path is bit-identical to ORIG; graph, dtype, shape, or nonfinite
+  mismatches fall through to the generic interpreter.
+- MEASURED per-crate (`rch exec`, worker `vmi1152480`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `AGENT_NAME=DustyDog`):
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed
+  'mish/(orig_decomposed|fast_eval_jaxpr)_4096x1024' -- --warm-up-time 1 --measurement-time 2
+  --sample-size 10 --noplot`.
+
+  | row | median |
+  | --- | ---: |
+  | `compiled_dispatch/mish/orig_decomposed_4096x1024` | 184.00 ms |
+  | `compiled_dispatch/mish/fast_eval_jaxpr_4096x1024` | 106.67 ms |
+
+  Ratio vs ORIG: **0.5797x time / 1.72x faster**. Conservative CI floor:
+  `155.61 / 123.62 = 1.26x`; intervals remain separated despite worker variance.
+- VALIDATION: `cargo fmt -p fj-interpreters -p fj-lax --check` GREEN.
+  `rch exec -- cargo test -p fj-interpreters
+  eval_top_level_mish_f64_matches_generic_and_preserves_edges --lib` GREEN on worker `hz2`.
+  `rch exec -- cargo test -p fj-lax test_mish_at_zero --lib` GREEN on worker `vmi1152480`.
+  The runs still report pre-existing `fj-lax` warnings in arithmetic/reduction/linalg; they are
+  unrelated to this change.
+
 ## 2026-07-04 - WIN 3.92x vs ORIG: row-wise probability cross-entropy fused interpreter superinstruction (DustyDog)
 
 - Agent: DustyDog. Crate: `fj-interpreters` (+ `fj-lax::nn::cross_entropy_2d` row kernel).

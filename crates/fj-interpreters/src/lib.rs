@@ -1247,6 +1247,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_mish_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_silu_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -5483,6 +5487,86 @@ fn try_eval_top_level_softplus_f64(
     }
 
     let output = fj_lax::nn::softplus_direct(values);
+    Some(
+        TensorValue::new_f64_values(input.shape.clone(), output)
+            .map(Value::Tensor)
+            .map(|value| vec![value])
+            .map_err(EvalError::InvalidTensor)
+            .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for the Mish activation graph
+/// `x * tanh(log(1 + exp(x)))`: the 5-equation elementwise chain
+/// `Exp(x) → Add(1, ·) → Log → Tanh → Mul(x, ·)`. Pure elementwise (shape-agnostic); the
+/// general fuser cannot fuse it because `Exp`/`Log`/`Tanh` are not `CheapOp`s. Finite dense f64
+/// only, else falls through. Bit-identical: `mish_direct` uses the graph's direct
+/// `(1.0 + exp(x)).ln().tanh()` grouping before the final multiply by `x`.
+fn try_eval_top_level_mish_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 5
+        || args.len() != 1
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let out = jaxpr.outvars[0];
+    let [exp_eq, add_eq, log_eq, tanh_eq, mul_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    let e = single_output_for_primitive(exp_eq, Primitive::Exp)?;
+    if exp_eq.inputs.as_slice() != [Atom::Var(x)] {
+        return None;
+    }
+    let one_plus = single_output_for_primitive(add_eq, Primitive::Add)?;
+    let add_const = match add_eq.inputs.as_slice() {
+        [Atom::Var(v), atom] if *v == e => f64_literal(atom),
+        [atom, Atom::Var(v)] if *v == e => f64_literal(atom),
+        _ => None,
+    };
+    if add_const?.to_bits() != 1.0_f64.to_bits() {
+        return None;
+    }
+    let logged = single_output_for_primitive(log_eq, Primitive::Log)?;
+    if log_eq.inputs.as_slice() != [Atom::Var(one_plus)] {
+        return None;
+    }
+    let activated = single_output_for_primitive(tanh_eq, Primitive::Tanh)?;
+    if tanh_eq.inputs.as_slice() != [Atom::Var(logged)] {
+        return None;
+    }
+    let product = single_output_for_primitive(mul_eq, Primitive::Mul)?;
+    let mul_ok = matches!(
+        mul_eq.inputs.as_slice(),
+        [Atom::Var(a), Atom::Var(b)]
+            if (*a == x && *b == activated) || (*a == activated && *b == x)
+    );
+    if product != out || !mul_ok {
+        return None;
+    }
+
+    let Value::Tensor(input) = &args[0] else {
+        return None;
+    };
+    if input.dtype != DType::F64 {
+        return None;
+    }
+    let values = input.elements.as_f64_slice()?;
+    if !values.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::mish_direct(values);
     Some(
         TensorValue::new_f64_values(input.shape.clone(), output)
             .map(Value::Tensor)
@@ -27101,6 +27185,102 @@ mod tests {
             .expect("nonfinite softplus falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite softplus");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_mish_jaxpr() -> Jaxpr {
+        let x = VarId(1);
+        let e = VarId(2);
+        let one_plus = VarId(3);
+        let logged = VarId(4);
+        let activated = VarId(5);
+        let out = VarId(6);
+        Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![e],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(e)],
+                    outputs: smallvec![one_plus],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(one_plus)],
+                    outputs: smallvec![logged],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Tanh,
+                    inputs: smallvec![Atom::Var(logged)],
+                    outputs: smallvec![activated],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(x), Atom::Var(activated)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_mish_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.33).sin() * 3.5 - 1.75)
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .expect("dense f64 input"),
+        );
+        let jaxpr = make_mish_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).expect("fast mish");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[input]).expect("generic mish");
+        assert_eq!(fast, generic);
+
+        let mut nonfinite_data: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        nonfinite_data[cols + 1] = f64::NAN;
+        let nonfinite = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                nonfinite_data,
+            )
+            .expect("dense nonfinite f64 input"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, std::slice::from_ref(&nonfinite))
+            .expect("nonfinite mish falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[nonfinite]).expect("generic nonfinite mish");
         assert_eq!(through_eval, through_generic);
     }
 
