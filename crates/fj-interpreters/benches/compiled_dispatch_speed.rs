@@ -1314,6 +1314,101 @@ fn build_cross_entropy_2d_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_binary_cross_entropy_2d_jaxpr() -> Jaxpr {
+    let labels = VarId(1);
+    let probs = VarId(2);
+    let log_p = VarId(3);
+    let yes_term = VarId(4);
+    let one_minus_y = VarId(5);
+    let one_minus_p = VarId(6);
+    let log_one_minus_p = VarId(7);
+    let no_term = VarId(8);
+    let total = VarId(9);
+    let summed = VarId(10);
+    let out = VarId(11);
+    let one = Atom::Lit(Literal::from_f64(1.0));
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    Jaxpr::new(
+        vec![labels, probs],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Log,
+                inputs: smallvec::smallvec![Atom::Var(probs)],
+                outputs: smallvec::smallvec![log_p],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(labels), Atom::Var(log_p)],
+                outputs: smallvec::smallvec![yes_term],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![one.clone(), Atom::Var(labels)],
+                outputs: smallvec::smallvec![one_minus_y],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![one, Atom::Var(probs)],
+                outputs: smallvec::smallvec![one_minus_p],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Log,
+                inputs: smallvec::smallvec![Atom::Var(one_minus_p)],
+                outputs: smallvec::smallvec![log_one_minus_p],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(one_minus_y), Atom::Var(log_one_minus_p)],
+                outputs: smallvec::smallvec![no_term],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec::smallvec![Atom::Var(yes_term), Atom::Var(no_term)],
+                outputs: smallvec::smallvec![total],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(total)],
+                outputs: smallvec::smallvec![summed],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Neg,
+                inputs: smallvec::smallvec![Atom::Var(summed)],
+                outputs: smallvec::smallvec![out],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_kl_divergence_2d_jaxpr() -> Jaxpr {
     let p = VarId(1);
     let q = VarId(2);
@@ -3320,6 +3415,31 @@ fn eval_cross_entropy_2d_decomposed(p: &Value, q: &Value) -> Value {
     eval_primitive(Primitive::Neg, std::slice::from_ref(&summed), &empty).expect("neg")
 }
 
+fn eval_binary_cross_entropy_2d_decomposed(labels: &Value, probs: &Value) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let empty = BTreeMap::new();
+    let one = Value::scalar_f64(1.0);
+    let log_p = eval_primitive(Primitive::Log, std::slice::from_ref(probs), &empty).expect("log p");
+    let yes_term =
+        eval_primitive(Primitive::Mul, &[labels.clone(), log_p], &empty).expect("y*log p");
+    let one_minus_y =
+        eval_primitive(Primitive::Sub, &[one.clone(), labels.clone()], &empty).expect("1-y");
+    let one_minus_p = eval_primitive(Primitive::Sub, &[one, probs.clone()], &empty).expect("1-p");
+    let log_one_minus_p =
+        eval_primitive(Primitive::Log, std::slice::from_ref(&one_minus_p), &empty)
+            .expect("log 1-p");
+    let no_term = eval_primitive(Primitive::Mul, &[one_minus_y, log_one_minus_p], &empty)
+        .expect("(1-y)*log(1-p)");
+    let total = eval_primitive(Primitive::Add, &[yes_term, no_term], &empty).expect("bce terms");
+    let summed = eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&total),
+        &reduce_axis1,
+    )
+    .expect("sum bce");
+    eval_primitive(Primitive::Neg, std::slice::from_ref(&summed), &empty).expect("neg bce")
+}
+
 fn eval_entropy_2d_decomposed(p: &Value) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let empty = BTreeMap::new();
@@ -4454,6 +4574,49 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
                 eval_jaxpr(
                     black_box(&cross_entropy_jaxpr),
                     black_box(&cross_entropy_args),
+                )
+                .unwrap(),
+            )
+        })
+    });
+    let binary_cross_entropy_jaxpr = build_binary_cross_entropy_2d_jaxpr();
+    let binary_cross_entropy_labels = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            (0..rows * cols)
+                .map(|idx| ((idx as f64) * 0.000_19).sin() * 0.35 + 0.5)
+                .collect(),
+        )
+        .expect("binary cross entropy labels"),
+    );
+    let binary_cross_entropy_probs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            (0..rows * cols)
+                .map(|idx| ((idx as f64) * 0.000_23).cos() * 0.35 + 0.5)
+                .collect(),
+        )
+        .expect("binary cross entropy probs"),
+    );
+    let binary_cross_entropy_args = [binary_cross_entropy_labels, binary_cross_entropy_probs];
+    group.bench_function("binary_cross_entropy_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_binary_cross_entropy_2d_decomposed(
+                black_box(&binary_cross_entropy_args[0]),
+                black_box(&binary_cross_entropy_args[1]),
+            ))
+        })
+    });
+    group.bench_function("binary_cross_entropy_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| {
+            black_box(
+                eval_jaxpr(
+                    black_box(&binary_cross_entropy_jaxpr),
+                    black_box(&binary_cross_entropy_args),
                 )
                 .unwrap(),
             )

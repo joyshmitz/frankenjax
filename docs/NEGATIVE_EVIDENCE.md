@@ -2,6 +2,49 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-08 - WIN 9.86x vs ORIG: row-wise binary cross-entropy fused interpreter superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::binary_cross_entropy_2d`).
+  Consulted this ledger first and avoided the rejected producerless reducer, FFT/rFFT,
+  Cholesky, gather-SIMD, branchless select, and Poisson lookup-table lanes. No qualifying
+  unlanded `.scratch`/worktree measured win was missing from `main`; this pass finished the
+  in-progress `frankenjax-a578m` dig lane. Graveyard/artifact mapping: information-theoretic loss
+  primitive plus row-local interpreter superinstruction, analogous to vectorized execution/query-JIT
+  elimination of interpreter materialization overhead.
+- LEVER: top-level recognizer matches the exact dense finite f64 rank-2 graph
+  `Log(p) -> Mul(y,.) | Sub(1,y) | Sub(1,p) -> Log -> Mul -> Add -> ReduceSum(axis=1) -> Neg`
+  and dispatches to one row-parallel kernel. The helper intentionally preserves the naive graph
+  grouping, including unclipped `p=0`/`p=1` inf/NaN behavior; graph, dtype, shape, empty, or
+  nonfinite-input mismatches fall through to the generic interpreter.
+- MEASURED per-crate (`rch exec`, worker `ovh-a`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `AGENT_NAME=BlackThrush`).
+  The user-requested `cargo bench --release` spelling was attempted first and Cargo rejected it
+  with `unexpected argument '--release'`; this toolchain uses `--profile release` for benches.
+  Accepted command:
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed
+  binary_cross_entropy_2d -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`.
+
+  | row | median | CI |
+  | --- | ---: | ---: |
+  | `compiled_dispatch/binary_cross_entropy_2d/orig_decomposed_4096x1024` | 102.65 ms | 102.12-103.23 ms |
+  | `compiled_dispatch/binary_cross_entropy_2d/fast_eval_jaxpr_4096x1024` | 10.410 ms | 9.8672-12.043 ms |
+
+  Ratio vs ORIG: **0.101x time / 9.86x faster** by midpoint. Conservative CI floor:
+  `102.12 / 12.043 = 8.48x`; intervals are separated.
+- VALIDATION: `cargo fmt -p fj-interpreters -p fj-lax --check` GREEN.
+  `rch exec -- cargo test -p fj-interpreters
+  eval_top_level_binary_cross_entropy_2d_f64_matches_generic_and_preserves_edges --lib` GREEN
+  after RCH fail-open local execution (no admissible workers; target dir still
+  `/data/projects/.rch-targets/jax-cod`). Conformance stayed GREEN:
+  `rch exec -- cargo test -p fj-conformance --profile release -- --nocapture` after the same RCH
+  fail-open local path. `rch exec -- cargo check --workspace --all-targets` GREEN on
+  `vmi1293453`; it still reports pre-existing unrelated `fj-lax` warnings. `rch exec -- cargo
+  clippy --workspace --all-targets -- -D warnings` was discarded once on `ovh-b` due to
+  build-script `SIGILL`, then failed on `vmi1293453` only on existing `fj-lax` lint debt outside
+  this lever (`arithmetic.rs`, `reduction.rs`, `linalg.rs`, `einsum.rs`, `simd_exp.rs`,
+  `tensor_ops.rs`, `lib.rs`). `ubs` on touched files likewise exits non-zero on broad existing
+  panic/indexing/test-surface heuristics; its internal fmt/clippy/check/test subchecks were clean.
+
 ## 2026-07-05 - NO-SHIP 1.158x time vs ORIG: Poisson PTRS bounded log-factorial table regressed/no-significance (DustyDog)
 
 - Agent: DustyDog. Crate: `fj-lax`. Dug a non-interpreter primitive after the Mish win,

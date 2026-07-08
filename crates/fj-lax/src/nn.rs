@@ -1981,6 +1981,72 @@ pub fn cross_entropy_2d(p: &[f64], q: &[f64], rows: usize, cols: usize) -> Vec<f
     result
 }
 
+fn binary_cross_entropy_row(labels: &[f64], probs: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for (&yv, &pv) in labels.iter().zip(probs.iter()) {
+        let yes = yv * pv.ln();
+        let no = (1.0 - yv) * (1.0 - pv).ln();
+        sum += yes + no;
+    }
+    -sum
+}
+
+/// Binary cross-entropy from probabilities
+/// `-sum(y*log(p) + (1-y)*log(1-p))` along the last axis of two 2D arrays,
+/// one scalar per row. ROW-PARALLEL and BIT-IDENTICAL to the decomposed graph:
+/// every element computes the two `Sub(1, .)` values, two `Log`s, two `Mul`s,
+/// their `Add`, then an index-order `ReduceSum` and final `Neg`.
+///
+/// This intentionally matches the naive graph, not a clipped/stabilized BCE helper:
+/// `p=0`/`p=1` and non-binary labels propagate inf/NaN exactly as the primitive graph would.
+#[must_use]
+pub fn binary_cross_entropy_2d(
+    labels: &[f64],
+    probs: &[f64],
+    rows: usize,
+    cols: usize,
+) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D binary_cross_entropy labels", labels, rows, cols);
+    let _ = checked_2d_row_major_len("2D binary_cross_entropy probs", probs, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot =
+                binary_cross_entropy_row(&labels[start..start + cols], &probs[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let label_block = &labels[row0 * cols..(row0 + row_count) * cols];
+            let prob_block = &probs[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = binary_cross_entropy_row(
+                        &label_block[start..start + cols],
+                        &prob_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
 /// Shannon entropy of a single row, `-Σ p·log(p)`, bit-identical to the decomposed
 /// `Log → Mul(p,·) → ReduceSum → Neg` graph: an index-order sum of `p[i]·ln(p[i])`, negated.
 /// `Log` = the same `.ln()` the `Log` primitive dispatches (scalar-bit-identical). Matches the NAIVE

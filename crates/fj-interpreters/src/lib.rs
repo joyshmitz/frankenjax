@@ -1235,6 +1235,11 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_binary_cross_entropy_2d_f64(jaxpr, const_values, args)
+    {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_manhattan_distance_2d_f64(jaxpr, const_values, args) {
         return result;
     }
@@ -5190,6 +5195,155 @@ fn try_eval_top_level_cross_entropy_2d_f64(
     }
 
     let output = fj_lax::nn::cross_entropy_2d(p_v, q_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for row-wise binary cross-entropy from probabilities
+/// `-sum(y*log(p) + (1-y)*log(1-p))` along the last axis: the exact 9-equation,
+/// TWO-input graph `Log(p) -> Mul(y,.) | Sub(1,y) | Sub(1,p) -> Log -> Mul -> Add
+/// -> ReduceSum(axis=1) -> Neg`. Two f64 [rows,cols] inputs, one [rows] output
+/// (rank-reducing). This is distinct from probability cross-entropy (`-sum p*log(q)`) and
+/// logits softmax-cross-entropy; it is the binary classifier / multilabel Bernoulli loss.
+/// The fused row kernel preserves every scalar operation grouping and the index-order reduction.
+fn try_eval_top_level_binary_cross_entropy_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 9
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let labels = jaxpr.invars[0];
+    let probs = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [
+        log_p_eq,
+        yes_term_eq,
+        one_minus_y_eq,
+        one_minus_p_eq,
+        log_one_minus_p_eq,
+        no_term_eq,
+        total_eq,
+        sum_eq,
+        neg_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    let log_p = single_output_for_primitive(log_p_eq, Primitive::Log)?;
+    if log_p_eq.inputs.as_slice() != [Atom::Var(probs)] {
+        return None;
+    }
+
+    let yes_term = single_output_for_primitive(yes_term_eq, Primitive::Mul)?;
+    let yes_ok = matches!(
+        yes_term_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)] if (*x == labels && *y == log_p) || (*x == log_p && *y == labels)
+    );
+    if !yes_ok {
+        return None;
+    }
+
+    let one_minus_y = single_output_for_primitive(one_minus_y_eq, Primitive::Sub)?;
+    let [one_lit, label_atom] = one_minus_y_eq.inputs.as_slice() else {
+        return None;
+    };
+    if f64_literal(one_lit)?.to_bits() != 1.0f64.to_bits() || label_atom != &Atom::Var(labels) {
+        return None;
+    }
+
+    let one_minus_p = single_output_for_primitive(one_minus_p_eq, Primitive::Sub)?;
+    let [one_lit, prob_atom] = one_minus_p_eq.inputs.as_slice() else {
+        return None;
+    };
+    if f64_literal(one_lit)?.to_bits() != 1.0f64.to_bits() || prob_atom != &Atom::Var(probs) {
+        return None;
+    }
+
+    let log_one_minus_p = single_output_for_primitive(log_one_minus_p_eq, Primitive::Log)?;
+    if log_one_minus_p_eq.inputs.as_slice() != [Atom::Var(one_minus_p)] {
+        return None;
+    }
+
+    let no_term = single_output_for_primitive(no_term_eq, Primitive::Mul)?;
+    let no_ok = matches!(
+        no_term_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)]
+            if (*x == one_minus_y && *y == log_one_minus_p)
+                || (*x == log_one_minus_p && *y == one_minus_y)
+    );
+    if !no_ok {
+        return None;
+    }
+
+    let total = single_output_for_primitive(total_eq, Primitive::Add)?;
+    let total_ok = matches!(
+        total_eq.inputs.as_slice(),
+        [Atom::Var(x), Atom::Var(y)]
+            if (*x == yes_term && *y == no_term) || (*x == no_term && *y == yes_term)
+    );
+    if !total_ok {
+        return None;
+    }
+
+    let summed = single_output_for_param_primitive(sum_eq, Primitive::ReduceSum)?;
+    if sum_eq.inputs.as_slice() != [Atom::Var(total)] || !axis1_reduce_params(&sum_eq.params) {
+        return None;
+    }
+
+    let negated = single_output_for_primitive(neg_eq, Primitive::Neg)?;
+    if negated != out || neg_eq.inputs.as_slice() != [Atom::Var(summed)] {
+        return None;
+    }
+
+    let Value::Tensor(labels_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(probs_t) = &args[1] else {
+        return None;
+    };
+    if labels_t.dtype != DType::F64
+        || probs_t.dtype != DType::F64
+        || labels_t.shape.dims.len() != 2
+        || probs_t.shape.dims != labels_t.shape.dims
+    {
+        return None;
+    }
+    let rows = labels_t.shape.dims[0] as usize;
+    let cols = labels_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let labels_v = labels_t.elements.as_f64_slice()?;
+    let probs_v = probs_t.elements.as_f64_slice()?;
+    if !labels_v.iter().all(|value| value.is_finite())
+        || !probs_v.iter().all(|value| value.is_finite())
+    {
+        return None;
+    }
+
+    let output = fj_lax::nn::binary_cross_entropy_2d(labels_v, probs_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -24835,6 +24989,149 @@ mod tests {
             .expect("nonfinite cross_entropy falls through");
         let through_generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[p_ok, q_nf])
             .expect("generic nonfinite cross_entropy");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    fn make_binary_cross_entropy_2d_jaxpr() -> Jaxpr {
+        let labels = VarId(1);
+        let probs = VarId(2);
+        let log_p = VarId(3);
+        let yes_term = VarId(4);
+        let one_minus_y = VarId(5);
+        let one_minus_p = VarId(6);
+        let log_one_minus_p = VarId(7);
+        let no_term = VarId(8);
+        let total = VarId(9);
+        let summed = VarId(10);
+        let out = VarId(11);
+        let one = Atom::Lit(Literal::from_f64(1.0));
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        Jaxpr::new(
+            vec![labels, probs],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(probs)],
+                    outputs: smallvec![log_p],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(labels), Atom::Var(log_p)],
+                    outputs: smallvec![yes_term],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![one.clone(), Atom::Var(labels)],
+                    outputs: smallvec![one_minus_y],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![one, Atom::Var(probs)],
+                    outputs: smallvec![one_minus_p],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(one_minus_p)],
+                    outputs: smallvec![log_one_minus_p],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(one_minus_y), Atom::Var(log_one_minus_p)],
+                    outputs: smallvec![no_term],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(yes_term), Atom::Var(no_term)],
+                    outputs: smallvec![total],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(total)],
+                    outputs: smallvec![summed],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(summed)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_top_level_binary_cross_entropy_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let label_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.19).sin() * 0.35 + 0.5)
+            .collect();
+        let prob_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.23).cos() * 0.35 + 0.5)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let labels = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, label_data)
+                .expect("labels input"),
+        );
+        let probs = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, prob_data)
+                .expect("probs input"),
+        );
+        let jaxpr = make_binary_cross_entropy_2d_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, &[labels.clone(), probs.clone()]).expect("fast bce");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[labels, probs]).expect("generic bce");
+        assert_eq!(fast, generic);
+
+        let mut prob_nonfinite: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.17).cos() * 0.3 + 0.5)
+            .collect();
+        prob_nonfinite[cols + 1] = f64::NAN;
+        let labels_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims: dims.clone() },
+                (0..rows * cols)
+                    .map(|idx| ((idx as f64) * 0.11).sin() * 0.3 + 0.5)
+                    .collect(),
+            )
+            .expect("finite labels"),
+        );
+        let probs_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims }, prob_nonfinite).expect("nonfinite probs"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[labels_ok.clone(), probs_nf.clone()])
+            .expect("nonfinite bce falls through");
+        let through_generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[labels_ok, probs_nf])
+            .expect("generic nonfinite bce");
         assert_eq!(through_eval, through_generic);
     }
 
