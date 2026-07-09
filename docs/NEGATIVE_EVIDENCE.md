@@ -2,6 +2,43 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - NO-SHIP 0.998x vs ORIG: dense complex replicated-broadcast fill route (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided the
+  rejected Poisson convergence/table, producerless reducer, branchless select,
+  gather/scatter SIMD, FFT/radix, Cholesky/GEMM, row-wise interpreter
+  superinstructions, cumsum-family reruns, and special-function sibling lanes.
+  Profile target was the remaining `BroadcastInDim` dense complex replicated
+  tensor row, `nn/complex_replicated_broadcast_4096x1024`: Complex128
+  `[4096] -> [4096,1024]` with `broadcast_dimensions=0`.
+- HYPOTHESIS: route the dense complex tensor branch through the existing
+  preallocated `broadcast_replicate_into` fill kernel instead of the older
+  `broadcast_replicate` Vec-building path. Graveyard/artifact mapping: treat the
+  trailing replicated axis as a run-length fill automaton over dense `(re, im)`
+  pairs, preserving complex packed storage while eliminating per-output odometer
+  extension on 1024-wide runs.
+- RESULT: rejected and reverted cleanly. The candidate parity test passed before
+  revert, but the short criterion row did not improve the LEGACY ORIGINAL row.
+  Do not retry this direct complex `broadcast_replicate_into` substitution for
+  `BroadcastInDim`; it adds no measured win on the profiled path.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG `nn/complex_replicated_broadcast_4096x1024` | `vmi1227854` | 92.549 ms | 90.162-94.860 ms |
+  | candidate direct complex fill route | `vmi1293453` | 92.723 ms | 88.768-96.868 ms |
+
+  Ratio vs ORIG: **1.002x time / 0.998x speed** by midpoint, with overlapping
+  intervals and a cross-worker split. No source code shipped.
+- VALIDATION: candidate-only targeted parity check was GREEN before revert:
+  `rch exec -- cargo test -p fj-lax --profile release
+  dense_broadcast_in_dim_matches_literal_path_and_stays_dense --lib --
+  --nocapture` (RCH fail-open local, 1 passed). Final byte-exact conformance
+  after reverting the Rust change was GREEN: `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed). Pre-existing unrelated `fj-lax` warnings in
+  `reduction.rs` and `linalg.rs` remain outside this docs-only rejection.
+
 ## 2026-07-09 - WIN 1.312x vs ORIG: tetragamma SIMD recurrence kernel (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided the
