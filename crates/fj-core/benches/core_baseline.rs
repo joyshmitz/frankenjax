@@ -172,6 +172,12 @@ fn bench_literal_buffer_serialize(c: &mut Criterion) {
     c.bench_function("core/literal_buffer_serialize_dense_f64_64k", |b| {
         b.iter(|| serde_json::to_vec(black_box(&dense)).expect("serialize dense buffer"))
     });
+    c.bench_function("core/literal_buffer_serialize_dense_f64_64k_legacy", |b| {
+        b.iter(|| {
+            serde_json::to_vec(&black_box(&dense).__fj_legacy_serialize_adapter())
+                .expect("serialize legacy dense buffer")
+        })
+    });
     c.bench_function("core/literal_buffer_serialize_literal_f64_64k", |b| {
         b.iter(|| serde_json::to_vec(black_box(&literal)).expect("serialize literal buffer"))
     });

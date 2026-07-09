@@ -2,6 +2,102 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 9.61x vs ORIG: lower-triangular jacfwd chain-cumsum primitive (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-ad`. Consulted this ledger first and avoided
+  the rejected dense complex broadcast, Poisson convergence/table,
+  producerless reducer, branchless select, gather/scatter SIMD, FFT/radix,
+  Cholesky/GEMM, cumsum-family raw-kernel reruns, row-wise interpreter
+  superinstructions, special-function sibling lanes, BF16 convert, pad 4D NHWC
+  threading/calloc, bitcast/rev/one-hot, and the already-optimized general
+  `broadcast_binary_f64` path. Profiled `fj-ad`; the hottest eligible residual
+  was `ad_jacfwd_chain_cumsum/jacobian_384`.
+- LEVER: treat `elementwise-chain -> cumsum(axis=0)` jacfwd as a sparse
+  lower-triangular operator. For dense finite F64 rank-1 inputs, with no custom
+  JVP/VJP hooks and only cacheable multiply-form unary elementwise equations
+  before the final axis-0 `Cumsum`, compute the diagonal derivative vector once
+  via the existing JVP rules, evaluate the primal once for shape/validation, and
+  materialize `J[row,col] = g'(x[col])` for `row >= col`. Signed zero is
+  normalized to preserve the existing cumsum tangent bits; every other shape,
+  dtype, parameter, custom-rule, or non-finite case falls through to the legacy
+  linearize/per-column machinery.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-ad --profile release --bench ad_baseline
+  'ad_jacfwd_chain_cumsum/jacobian_384' -- --warm-up-time 1 --measurement-time 2
+  --sample-size 10 --noplot`). ORIG and candidate were separate short runs; the
+  worker split is shown explicitly.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG legacy linearize/column replay `ad_jacfwd_chain_cumsum/jacobian_384` | `hz2` | 4.4322 ms | 4.2764-4.5392 ms |
+  | candidate lower-triangular primitive `ad_jacfwd_chain_cumsum/jacobian_384` | `ovh-a` | 461.20 us | 459.48-463.21 us |
+
+  Ratio vs ORIG: **0.104x time / 9.61x faster** by midpoint. Conservative
+  cross-worker CI floor: `4.2764 ms / 0.46321 ms = 9.23x`.
+- VALIDATION: focused byte-exact column parity test GREEN with the requested
+  wrapper on `ovh-a`: `cargo test -p fj-ad --profile release
+  jacfwd_chain_cumsum_lower_triangular_matches_columns --lib -- --nocapture` (1
+  passed). Byte-exact conformance GREEN with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed). `cargo fmt -p fj-ad`, `cargo fmt --check -p
+  fj-ad`, and `git diff --check -- crates/fj-ad/src/lib.rs` were GREEN.
+  `cargo check -p fj-ad --profile release --all-targets` was GREEN locally,
+  with only pre-existing `fj-lax` rustc warnings; the same RCH check hit
+  worker-local `zerocopy` build-script `SIGILL` on `ovh-b` before this crate
+  compiled.
+
+## 2026-07-09 - WIN 1.09x vs ORIG: dense f64 LiteralBuffer serde variant-token transducer (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-core`. Consulted this ledger first and
+  avoided the rejected dense complex broadcast, Poisson convergence/table,
+  producerless reducer, branchless select, gather/scatter SIMD, FFT/radix,
+  Cholesky/GEMM, cumsum-family, row-wise interpreter metric/loss
+  superinstructions, special-function sibling lanes, BF16 convert, contiguous
+  slice copy, and the just-landed Scan SIMD lane. Profiled `fj-core` and
+  `fj-cache`; the hottest contained row was
+  `core/literal_buffer_serialize_dense_f64_64k` (~1.44 ms on `vmi1293453`),
+  while cache rows were sub-us and the next core rows were tens of us.
+- LEVER: treat dense f64 JSON serialization as a finite variant-token
+  transducer. The `Literal::F64Bits` derived-serde shape is fixed, so dense f64
+  lanes now emit a tiny `SerializeF64Bits(bits)` newtype via
+  `serialize_newtype_variant("Literal", 8, "F64Bits", &bits)` instead of
+  constructing a `Literal::F64Bits` enum per element. This preserves generic
+  serde array semantics and byte-identical JSON. A doc-hidden
+  `__fj_legacy_serialize_adapter()` keeps the old per-element
+  `Literal::from_f64` path for same-binary ORIG measurement only.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-core --profile release --bench core_baseline
+  'core/literal_buffer_serialize_dense_f64_64k(_legacy)?$' -- --warm-up-time 1
+  --measurement-time 3 --sample-size 10 --noplot`). ORIG and candidate are
+  same-worker, same-binary rows on `hz2`.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG legacy `core/literal_buffer_serialize_dense_f64_64k_legacy` | `hz2` | 1.3896 ms | 1.3397-1.4595 ms |
+  | candidate `core/literal_buffer_serialize_dense_f64_64k` | `hz2` | 1.2726 ms | 1.2606-1.2929 ms |
+
+  Ratio vs ORIG: **0.916x time / 1.09x faster** by midpoint. Conservative CI
+  floor: `1.3397 / 1.2929 = 1.036x`.
+- VALIDATION: focused byte-exact serialization parity test GREEN with the
+  requested wrapper on `hz2` and `vmi1293453`: `cargo test -p fj-core
+  --profile release literal_buffer_streamed_serialization_matches_materialized_json
+  --lib -- --nocapture` (1 passed). `cargo check -p fj-core --profile release
+  --all-targets` GREEN on `hz1`; `cargo clippy -p fj-core --profile release
+  --all-targets --no-deps -- -D warnings` GREEN on `ovh-a`; byte-exact
+  conformance GREEN with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed). `rustfmt --edition 2024
+  crates/fj-core/src/lib.rs crates/fj-core/benches/core_baseline.rs`, `cargo
+  fmt -p fj-core -- --check`, and `git diff --check -- crates/fj-core/src/lib.rs
+  crates/fj-core/benches/core_baseline.rs` were GREEN. UBS over the owned files
+  was non-zero on broad pre-existing panic/indexing/cast inventories in the
+  large `fj-core` source and bench file; its embedded formatting, clippy,
+  cargo-check, test-build, audit, and deny subchecks were clean.
+
 ## 2026-07-09 - WIN 1.52x vs ORIG: SIMD lane transducer for f32 vector Scan add/emit (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters`. Consulted this ledger first and
