@@ -2,6 +2,64 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 1.27x vs ORIG: phase-reused log-softmax exp-buffer transducer (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and
+  avoided the rejected dense complex broadcast, Poisson convergence/table,
+  producerless reducer, branchless select, gather/scatter SIMD, FFT/radix,
+  Cholesky/GEMM, cumsum-family raw kernels and AD chain-cumsum, row-wise
+  interpreter superinstructions, special-function sibling lanes, BF16 convert,
+  pad/calloc, bitcast/rev/one-hot, dense f64 serde, Scan SIMD, threaded Slice
+  copy, and the already-optimized 2D softmax/log-softmax fused rows. A short
+  `fj-lax` profile picked `nn/log_softmax_16m_f64` as the hottest eligible real
+  primitive row: `104.64-107.80 ms` on `hz1`. Explicit reference/decomposed
+  rows were routing evidence only.
+- LEVER: treat large 1D log-softmax as a two-phase log-domain vector
+  transducer. Phase 1 materializes exactly the same `exp(x - max)` buffer used
+  by the threaded `logsumexp` path and sums it serially in index order. Phase 2
+  overwrites that same buffer with `x - lse` instead of allocating a second
+  128 MiB output vector. Empty, small, and infinite-max inputs use the legacy
+  allocating path/fallbacks, so the reduction order, NaN propagation, and
+  observable bits stay unchanged.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-lax --profile release --bench lax_baseline
+  'nn/log_softmax_16m_f64(_legacy)?$' -- --warm-up-time 1 --measurement-time 5
+  --sample-size 10 --noplot`). ORIG and candidate are same-binary rows from the
+  decisive local fail-open run.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG legacy allocating `nn/log_softmax_16m_f64_legacy` | local fail-open | 99.368 ms | 92.602-110.84 ms |
+  | candidate reused-buffer `nn/log_softmax_16m_f64` | local fail-open | 78.417 ms | 71.677-85.183 ms |
+
+  Ratio vs ORIG: **0.789x time / 1.27x faster** by midpoint. Conservative CI
+  floor: `92.602 / 85.183 = 1.087x`. An earlier same-binary `ovh-a` short run
+  was directionally consistent but noisy: candidate `56.457-87.285 ms`, legacy
+  `82.500-102.94 ms`.
+- VALIDATION: focused byte-exact parity test GREEN with the requested wrapper
+  (RCH fail-open local): `cargo test -p fj-lax --profile release
+  log_softmax_reused_exp_buffer_matches_legacy_bits --lib -- --nocapture` (1
+  passed). Existing threaded logsumexp/log-softmax bit-identity test GREEN with
+  the requested wrapper: `cargo test -p fj-lax --profile release
+  logsumexp_log_softmax_threaded_bit_identical --lib -- --nocapture` (1
+  passed). Byte-exact conformance GREEN with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed). `cargo fmt -p fj-lax`, `cargo fmt --check -p
+  fj-lax`, `git diff --check -- crates/fj-lax/src/nn.rs
+  crates/fj-lax/benches/lax_baseline.rs`, and `cargo check -p fj-lax
+  --profile release --all-targets` were GREEN; the check displayed only known
+  pre-existing `fj-lax` rustc warnings. `cargo clippy -p fj-lax --profile
+  release --all-targets --no-deps -- -D warnings` was blocked by broad
+  pre-existing `fj-lax` lint debt in unrelated files, with no visible finding
+  in the changed `nn.rs` hunk. UBS over
+  `crates/fj-lax/src/nn.rs`, `crates/fj-lax/benches/lax_baseline.rs`, and this
+  ledger file exited non-zero on broad pre-existing inventories in the large
+  source/bench files: panic/index/cast/bench unwrap surfaces. Its embedded
+  formatting, clippy, cargo-check, test-build, audit, and deny subchecks were
+  clean.
+
 ## 2026-07-09 - WIN 9.61x vs ORIG: lower-triangular jacfwd chain-cumsum primitive (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-ad`. Consulted this ledger first and avoided

@@ -5,6 +5,7 @@
 use std::f64::consts::PI;
 
 const SOFTMAX_2D_PARALLEL_MIN: usize = 1 << 18;
+const LOGSUMEXP_THREAD_MIN: usize = 1 << 21;
 
 /// Threaded elementwise `f64` map: applies `f` over `x` across work-scaled scoped threads,
 /// BIT-IDENTICAL to the sequential `x.iter().map(f).collect()` (each element is independent,
@@ -85,6 +86,42 @@ fn threaded_f64_map_bw(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
         return x.iter().map(|&v| f(v)).collect();
     }
     threaded_f64_map(x, f)
+}
+
+fn fill_log_softmax_sub_into(src: &[f64], dst: &mut [f64], lse: f64) {
+    debug_assert_eq!(src.len(), dst.len());
+    if src.len() < (1 << 23) {
+        for (d, &v) in dst.iter_mut().zip(src) {
+            *d = v - lse;
+        }
+        return;
+    }
+
+    let threads = crate::arithmetic::work_scaled_threads(src.len());
+    if threads <= 1 {
+        for (d, &v) in dst.iter_mut().zip(src) {
+            *d = v - lse;
+        }
+        return;
+    }
+
+    let chunk = src.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut dst_rest: &mut [f64] = dst;
+        let mut start = 0usize;
+        while start < src.len() {
+            let len = chunk.min(src.len() - start);
+            let (blk, tail) = dst_rest.split_at_mut(len);
+            dst_rest = tail;
+            let src_blk = &src[start..start + len];
+            scope.spawn(move || {
+                for (d, &v) in blk.iter_mut().zip(src_blk) {
+                    *d = v - lse;
+                }
+            });
+            start += len;
+        }
+    });
 }
 
 /// ReLU: max(x, 0)
@@ -351,7 +388,6 @@ pub fn logsumexp(x: &[f64]) -> f64 {
     // small inputs keep the fused single pass (no buffer / no thread-spawn overhead). (Refines
     // a convergent unconditional-threading commit that paid a buffer+extra-pass cost on small
     // inputs — the common axis-reduction case.)
-    const LOGSUMEXP_THREAD_MIN: usize = 1 << 21;
     let sum_exp: f64 = if x.len() >= LOGSUMEXP_THREAD_MIN {
         let exp_buf = threaded_f64_map(x, |v| (v - max_val).exp());
         exp_buf.iter().sum()
@@ -2345,6 +2381,27 @@ pub fn log_softmax(x: &[f64]) -> Vec<f64> {
     if x.is_empty() {
         return Vec::new();
     }
+    if x.len() < LOGSUMEXP_THREAD_MIN {
+        return __fj_legacy_log_softmax_allocating(x);
+    }
+
+    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if max_val.is_infinite() {
+        return threaded_f64_map_bw(x, move |v| v - max_val);
+    }
+    let mut out = threaded_f64_map(x, |v| (v - max_val).exp());
+    let sum_exp: f64 = out.iter().sum();
+    let lse = max_val + sum_exp.ln();
+    fill_log_softmax_sub_into(x, &mut out, lse);
+    out
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn __fj_legacy_log_softmax_allocating(x: &[f64]) -> Vec<f64> {
+    if x.is_empty() {
+        return Vec::new();
+    }
     let lse = logsumexp(x);
     threaded_f64_map_bw(x, move |v| v - lse)
 }
@@ -3666,6 +3723,24 @@ mod tests {
         let ls_ref: Vec<f64> = x.iter().map(|&v| v - lse_ref).collect();
         for (a, b) in log_softmax(&x).iter().zip(&ls_ref) {
             assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn log_softmax_reused_exp_buffer_matches_legacy_bits() {
+        let n = LOGSUMEXP_THREAD_MIN + 17;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 9973) as f64 - 5000.0) * 0.0009)
+            .collect();
+        let fast = log_softmax(&x);
+        let legacy = __fj_legacy_log_softmax_allocating(&x);
+        assert_eq!(fast.len(), legacy.len());
+        for (idx, (a, b)) in fast.iter().zip(&legacy).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "reused-buffer log_softmax diverged at {idx}: {a} vs {b}"
+            );
         }
     }
 

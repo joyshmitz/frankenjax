@@ -8534,6 +8534,14 @@ fn bench_logsumexp_1d_large(c: &mut Criterion) {
     c.bench_function("nn/log_softmax_16m_f64", |bencher| {
         bencher.iter(|| black_box(fj_lax::nn::log_softmax(black_box(&x))))
     });
+
+    c.bench_function("nn/log_softmax_16m_f64_legacy", |bencher| {
+        bencher.iter(|| {
+            black_box(fj_lax::nn::__fj_legacy_log_softmax_allocating(black_box(
+                &x,
+            )))
+        })
+    });
 }
 
 criterion_group!(
