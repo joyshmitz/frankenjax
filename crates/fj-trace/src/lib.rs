@@ -365,6 +365,7 @@ fn ensure_dense_var(
 pub struct SimpleTraceContext {
     next_tracer_id: u32,
     next_trace_id: u64,
+    fast_binary_elementwise_ops: bool,
     tracer_avals: Vec<ShapedArray>,
     const_values: BTreeMap<TracerId, Value>,
     frame_stack: Vec<TraceFrame>,
@@ -389,9 +390,14 @@ impl SimpleTraceContext {
 
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_binary_fast_path(true)
+    }
+
+    fn new_with_binary_fast_path(fast_binary_elementwise_ops: bool) -> Self {
         Self {
             next_tracer_id: 1,
             next_trace_id: 2,
+            fast_binary_elementwise_ops,
             tracer_avals: Vec::new(),
             const_values: BTreeMap::new(),
             frame_stack: vec![Self::root_frame()],
@@ -533,6 +539,43 @@ impl SimpleTraceContext {
         frame.last_output_ids = output_ids.clone();
 
         Ok(output_ids)
+    }
+
+    fn process_binary_elementwise_empty_params(
+        &mut self,
+        primitive: Primitive,
+        lhs_id: TracerId,
+        lhs_aval: &ShapedArray,
+        rhs_id: TracerId,
+        rhs_aval: &ShapedArray,
+    ) -> Result<(TracerId, ShapedArray), TraceError> {
+        if self.frame_stack.is_empty() {
+            return Err(TraceError::CompositionViolation);
+        }
+
+        let output_aval = infer_binary_elementwise_output_aval(primitive, lhs_aval, rhs_aval)?;
+        let tracer_aval = output_aval.clone();
+        let output_id = self.allocate_tracer(output_aval);
+
+        let mut inputs = SmallVec::new();
+        inputs.push(lhs_id);
+        inputs.push(rhs_id);
+
+        let mut outputs = SmallVec::new();
+        outputs.push(output_id);
+
+        let frame = self.active_frame_mut()?;
+        frame.equations.push(TraceEquation {
+            primitive,
+            inputs,
+            outputs,
+            params: BTreeMap::new(),
+            sub_jaxprs: Vec::new(),
+        });
+        frame.last_output_ids.clear();
+        frame.last_output_ids.push(output_id);
+
+        Ok((output_id, tracer_aval))
     }
 
     fn active_frame(&self) -> Result<&TraceFrame, TraceError> {
@@ -1932,7 +1975,11 @@ impl SimpleTraceContext {
                         ConvPadding::Valid => conv_valid_output_dim(eff_in, eff_kw, stride),
                         ConvPadding::Explicit(pairs) => {
                             let (lo, hi) = pairs.first().copied().unwrap_or((0, 0));
-                            conv_valid_output_dim(eff_in.saturating_add(lo).saturating_add(hi), eff_kw, stride)
+                            conv_valid_output_dim(
+                                eff_in.saturating_add(lo).saturating_add(hi),
+                                eff_kw,
+                                stride,
+                            )
                         }
                     };
                     vec![lhs.shape.dims[0], out_w as u32, c_out]
@@ -2023,7 +2070,11 @@ impl SimpleTraceContext {
                         ConvPadding::Valid => conv_valid_output_dim(eff_h_in, eff_kh, stride_h),
                         ConvPadding::Explicit(pairs) => {
                             let (lo, hi) = pairs.first().copied().unwrap_or((0, 0));
-                            conv_valid_output_dim(eff_h_in.saturating_add(lo).saturating_add(hi), eff_kh, stride_h)
+                            conv_valid_output_dim(
+                                eff_h_in.saturating_add(lo).saturating_add(hi),
+                                eff_kh,
+                                stride_h,
+                            )
                         }
                     };
                     let out_w = match &padding {
@@ -2031,7 +2082,11 @@ impl SimpleTraceContext {
                         ConvPadding::Valid => conv_valid_output_dim(eff_w_in, eff_kw, stride_w),
                         ConvPadding::Explicit(pairs) => {
                             let (lo, hi) = pairs.get(1).copied().unwrap_or((0, 0));
-                            conv_valid_output_dim(eff_w_in.saturating_add(lo).saturating_add(hi), eff_kw, stride_w)
+                            conv_valid_output_dim(
+                                eff_w_in.saturating_add(lo).saturating_add(hi),
+                                eff_kw,
+                                stride_w,
+                            )
                         }
                     };
                     vec![lhs.shape.dims[0], out_h as u32, out_w as u32, c_out]
@@ -2910,7 +2965,7 @@ fn parse_conv_padding_param(
             return Err(invalid());
         }
         let mut pairs = Vec::with_capacity(numbers.len() / 2);
-        for pair in numbers.chunks_exact(2) {
+        for pair in numbers.chunks(2) {
             let low = usize::try_from(pair[0]).map_err(|_| invalid())?;
             let high = usize::try_from(pair[1]).map_err(|_| invalid())?;
             pairs.push((low, high));
@@ -2975,7 +3030,7 @@ fn parse_reduce_window_padding_param(
             return Err(invalid());
         }
         let mut pairs = Vec::with_capacity(numbers.len() / 2);
-        for pair in numbers.chunks_exact(2) {
+        for pair in numbers.chunks(2) {
             let low = usize::try_from(pair[0]).map_err(|_| invalid())?;
             let high = usize::try_from(pair[1]).map_err(|_| invalid())?;
             pairs.push((low, high));
@@ -4193,6 +4248,23 @@ fn broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
     Some(Shape { dims })
 }
 
+fn infer_binary_elementwise_output_aval(
+    primitive: Primitive,
+    lhs: &ShapedArray,
+    rhs: &ShapedArray,
+) -> Result<ShapedArray, TraceError> {
+    let shape =
+        broadcast_shape(&lhs.shape, &rhs.shape).ok_or(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "cannot broadcast {:?} with {:?}",
+                lhs.shape.dims, rhs.shape.dims
+            ),
+        })?;
+    let dtype = promote_dtype(lhs.dtype, rhs.dtype);
+    Ok(ShapedArray { dtype, shape })
+}
+
 fn promote_dtype(lhs: DType, rhs: DType) -> DType {
     use DType::{BF16, Bool, Complex64, Complex128, F16, F32, F64, I32, I64, U32, U64};
 
@@ -4465,8 +4537,9 @@ impl TracerRef {
         if !Rc::ptr_eq(&self.ctx, expected_ctx) {
             return Err(TraceError::ForeignTracerContext { tracer_id: self.id });
         }
-        let actual = self.ctx.borrow().tracer_aval(self.id)?.clone();
-        if actual != self.aval {
+        let ctx = self.ctx.borrow();
+        let actual = ctx.tracer_aval(self.id)?;
+        if actual != &self.aval {
             return Err(TraceError::TracerInvariantViolation { tracer_id: self.id });
         }
         Ok(())
@@ -4509,16 +4582,28 @@ impl TracerRef {
     ) -> Result<TracerRef, TraceError> {
         self.validate_against_ctx(&self.ctx)?;
         other.validate_against_ctx(&self.ctx)?;
-        let output_ids = self.ctx.borrow_mut().process_primitive(
-            primitive,
-            &[self.id, other.id],
-            BTreeMap::new(),
-        )?;
-        let ctx = self.ctx.borrow();
-        let aval = ctx.tracer_aval(output_ids[0])?.clone();
-        drop(ctx);
+        let (id, aval) = {
+            let mut ctx = self.ctx.borrow_mut();
+            if ctx.fast_binary_elementwise_ops
+                && matches!(primitive, Primitive::Add | Primitive::Sub | Primitive::Mul)
+            {
+                ctx.process_binary_elementwise_empty_params(
+                    primitive,
+                    self.id,
+                    &self.aval,
+                    other.id,
+                    &other.aval,
+                )?
+            } else {
+                let output_ids =
+                    ctx.process_primitive(primitive, &[self.id, other.id], BTreeMap::new())?;
+                let id = output_ids[0];
+                let aval = ctx.tracer_aval(id)?.clone();
+                (id, aval)
+            }
+        };
         Ok(TracerRef {
-            id: output_ids[0],
+            id,
             aval,
             ctx: Rc::clone(&self.ctx),
         })
@@ -4643,7 +4728,31 @@ pub fn make_jaxpr<F>(f: F, in_avals: Vec<ShapedArray>) -> Result<ClosedJaxpr, Tr
 where
     F: FnOnce(&[TracerRef]) -> Vec<TracerRef>,
 {
-    let ctx = Rc::new(RefCell::new(SimpleTraceContext::new()));
+    make_jaxpr_with_binary_fast_path(f, in_avals, true)
+}
+
+#[doc(hidden)]
+pub fn make_jaxpr_legacy_original_binary_ops<F>(
+    f: F,
+    in_avals: Vec<ShapedArray>,
+) -> Result<ClosedJaxpr, TraceError>
+where
+    F: FnOnce(&[TracerRef]) -> Vec<TracerRef>,
+{
+    make_jaxpr_with_binary_fast_path(f, in_avals, false)
+}
+
+fn make_jaxpr_with_binary_fast_path<F>(
+    f: F,
+    in_avals: Vec<ShapedArray>,
+    fast_binary_elementwise_ops: bool,
+) -> Result<ClosedJaxpr, TraceError>
+where
+    F: FnOnce(&[TracerRef]) -> Vec<TracerRef>,
+{
+    let ctx = Rc::new(RefCell::new(SimpleTraceContext::new_with_binary_fast_path(
+        fast_binary_elementwise_ops,
+    )));
 
     // Allocate input tracers
     let input_refs: Vec<TracerRef> = in_avals
@@ -5003,12 +5112,7 @@ mod tests {
                     .expect("zero-sized reshape inference should succeed");
 
                 let aval = ctx.tracer_aval(reshaped[0]).expect("aval present");
-                assert_eq!(
-                    aval.shape,
-                    Shape {
-                        dims: vec![0, 3]
-                    }
-                );
+                assert_eq!(aval.shape, Shape { dims: vec![0, 3] });
                 assert_eq!(aval.dtype, DType::F64);
                 Ok(Vec::new())
             },
@@ -5208,9 +5312,7 @@ mod tests {
                     .process_primitive(Primitive::Tile, &[x], tile_params)
                     .expect("tile short-reps inference should succeed");
                 assert_eq!(
-                    ctx.tracer_aval(tiled_short[0])
-                        .expect("aval present")
-                        .shape,
+                    ctx.tracer_aval(tiled_short[0]).expect("aval present").shape,
                     Shape { dims: vec![5, 14] }
                 );
 
@@ -5236,9 +5338,7 @@ mod tests {
                     )
                     .expect("tile zero-rep inference should succeed");
                 assert_eq!(
-                    ctx.tracer_aval(tiled_zero[0])
-                        .expect("aval present")
-                        .shape,
+                    ctx.tracer_aval(tiled_zero[0]).expect("aval present").shape,
                     Shape { dims: vec![0, 14] }
                 );
 
@@ -8204,6 +8304,42 @@ mod tests {
         assert_eq!(closed.jaxpr.outvars.len(), 1);
         assert_eq!(closed.jaxpr.equations.len(), 1);
         assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Add);
+    }
+
+    #[test]
+    fn test_make_jaxpr_binary_fast_path_matches_legacy_original() {
+        use super::{make_jaxpr, make_jaxpr_legacy_original_binary_ops};
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+        let fast = make_jaxpr(
+            |inputs| {
+                let a = &inputs[0];
+                let b = &inputs[1];
+                let c = a + b;
+                let d = &c * a;
+                let e = &d + b;
+                let f = &e * &c;
+                vec![&f + &d]
+            },
+            vec![aval.clone(), aval.clone()],
+        )
+        .unwrap();
+        let legacy = make_jaxpr_legacy_original_binary_ops(
+            |inputs| {
+                let a = &inputs[0];
+                let b = &inputs[1];
+                let c = a + b;
+                let d = &c * a;
+                let e = &d + b;
+                let f = &e * &c;
+                vec![&f + &d]
+            },
+            vec![aval.clone(), aval],
+        )
+        .unwrap();
+        assert_eq!(fast, legacy);
     }
 
     #[test]

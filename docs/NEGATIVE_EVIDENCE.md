@@ -2,6 +2,59 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 1.38x vs ORIG: allocation-thinned scalar binary trace path (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-trace`.
+- Hottest profiled path: `trace/make_jaxpr_chain_5ops` from
+  `trace_baseline`; initial profile on `hz2` measured 3.2105 us, hotter than
+  the probed `fj-ffi` and `fj-cache` residual rows.
+- Negative-evidence guardrail: avoided closed `fj-lax` fusion/tensor/sort/FFT/
+  cumsum lanes and the 2026-07-09 no-ship large tensor DAG evaluator.
+- Alien primitive: region-style trace construction. The trace builder now skips
+  per-binary-op transient vectors and remapping work on the scalar
+  `Add`/`Sub`/`Mul` trace path while preserving final `Jaxpr` structure.
+- Lever: `TracerRef::binary_op` for `Add`/`Sub`/`Mul` uses
+  `process_binary_elementwise_empty_params`, deriving the output aval directly
+  from cached validated avals and pushing inline `SmallVec` inputs/outputs.
+  `make_jaxpr_legacy_original_binary_ops` remains as a hidden same-binary bench
+  comparator that disables the fast path.
+- SHORT BENCH vs LEGACY ORIGINAL, same binary, RCH remote `vmi1293453`:
+  `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+  rch exec -- cargo bench -p fj-trace --profile release --bench trace_baseline
+  -- chain_5ops --warm-up-time 1 --measurement-time 1 --sample-size 10
+  --noplot`.
+
+  | row | median |
+  | --- | ---: |
+  | `trace/make_jaxpr_chain_5ops` | 1.2394 us |
+  | `trace/make_jaxpr_chain_5ops_legacy_original` | 1.7040 us |
+  | ratio vs ORIG | 1.38x faster |
+
+- FINAL-TREE confirmation after parser-clippy cleanup: RCH fell open locally due
+  `insufficient_slots=10,active_project_exclusion=1`; candidate 1.1076 us vs
+  legacy 1.8276 us = 1.65x faster.
+- CORRECTNESS: `test_make_jaxpr_binary_fast_path_matches_legacy_original`
+  asserts exact `ClosedJaxpr` equality for the profiled five-op chain.
+- VALIDATION:
+  - `cargo fmt --check` GREEN.
+  - `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+    rch exec -- cargo check -p fj-trace --all-targets` GREEN on remote `hz1`;
+    only pre-existing dependency warnings from `fj-lax`.
+  - `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+    rch exec -- cargo test -p fj-trace --profile release` GREEN (151 lib tests,
+    9 nested tests, and doctests; RCH fell open locally under fleet pressure).
+  - `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+    rch exec -- cargo clippy -p fj-trace --all-targets --no-deps -- -D warnings`
+    GREEN on remote `hz1`; full dependency clippy remains blocked by
+    pre-existing `fj-lax` lint debt unrelated to this edit.
+  - `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+    rch exec -- cargo test -p fj-conformance --profile release` GREEN on remote
+    `vmi1227854` (all conformance tests and doctests passed).
+- RISK: fast path is only enabled for empty-param `Add`/`Sub`/`Mul` binary
+  tracer ops after existing foreign-context and cached-aval invariant checks;
+  all other primitive tracing continues through the generic `process_primitive`
+  path. The hidden legacy comparator is for bench evidence only.
+
 ## 2026-07-09 - NO-SHIP: large-vector direct f64 tensor-add DAG evaluator regressed vs ORIG (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-backend-cpu`. Consulted this ledger first and

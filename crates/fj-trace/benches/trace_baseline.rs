@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fj_core::{DType, Shape};
-use fj_trace::{ShapedArray, make_jaxpr};
+use fj_trace::{ShapedArray, make_jaxpr, make_jaxpr_legacy_original_binary_ops};
 
 fn scalar_f64() -> ShapedArray {
     ShapedArray {
@@ -58,6 +58,22 @@ fn bench_make_jaxpr_chain(c: &mut Criterion) {
     c.bench_function("trace/make_jaxpr_chain_5ops", |b| {
         b.iter(|| {
             make_jaxpr(
+                |inputs| {
+                    let a = &inputs[0];
+                    let b = &inputs[1];
+                    let c = a + b;
+                    let d = &c * a;
+                    let e = &d + b;
+                    let f = &e * &c;
+                    vec![&f + &d]
+                },
+                in_avals.clone(),
+            )
+        })
+    });
+    c.bench_function("trace/make_jaxpr_chain_5ops_legacy_original", |b| {
+        b.iter(|| {
+            make_jaxpr_legacy_original_binary_ops(
                 |inputs| {
                     let a = &inputs[0];
                     let b = &inputs[1];
