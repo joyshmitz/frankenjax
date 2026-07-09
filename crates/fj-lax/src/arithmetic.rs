@@ -7057,7 +7057,6 @@ pub(crate) fn sinc_f32_scalar(x: f32) -> f32 {
 /// f32 sinc ~28ms/16M since it is sin-bound). `x = 0 → 1`; non-finite `x` → scalar `sinc_f32_scalar`
 /// (`±inf → NaN`, matching libm). ~1-2 f32 ulp of `sin(πx)/(πx)`; parity is tolerance.
 pub(crate) fn sinc_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
-    use std::simd::Select;
     use std::simd::Simd;
     use std::simd::cmp::SimdPartialEq;
     use std::simd::num::SimdFloat;
@@ -12274,7 +12273,6 @@ fn cbrt_f32_scalar(x: f32) -> f32 {
 /// copysign (odd fn). ~f32 tolerance (few ulp) vs libm; matches JAX's own f32 cbrt (tolerance parity).
 fn cbrt_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     use std::simd::Simd;
-    use std::simd::StdFloat;
     use std::simd::cmp::SimdPartialOrd;
     use std::simd::num::SimdFloat;
     type F = Simd<f32, 8>;
@@ -12517,6 +12515,82 @@ fn trigamma_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
         for k in 0..8 {
             if !(xa[k] >= 0.5 && xa[k] < f64::INFINITY) {
                 ra[k] = polygamma_approx(1, xa[k]);
+            }
+        }
+        res = F::from_array(ra);
+    }
+    res
+}
+
+/// 8-wide `tetragamma` = `polygamma(2, x)` for finite `x >= 0.5`. This is the
+/// next hot order after trigamma: each recurrence step is exactly
+/// `-2.0 / shifted.powi(3)`, followed by the fixed `polygamma_asymptotic(2, .)`
+/// tail. Lanes outside the common shifted-asymptotic regime defer to scalar
+/// `polygamma_approx(2, .)`.
+fn tetragamma_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f64, 8>;
+    let half = F::splat(0.5);
+    let hundred = F::splat(100.0);
+    let one = F::splat(1.0);
+    let zero = F::splat(0.0);
+    let inf = F::splat(f64::INFINITY);
+    let simd_ok = x.simd_ge(half) & x.simd_lt(inf);
+    if !simd_ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = polygamma_approx(2, xa[k]);
+        }
+        return F::from_array(ra);
+    }
+
+    let mut shifted = x;
+    let mut result = zero;
+    loop {
+        let m = shifted.simd_lt(hundred) & simd_ok;
+        if !m.any() {
+            break;
+        }
+        let denom = shifted * shifted * shifted;
+        let term = F::splat(-2.0) / denom;
+        result += m.select(term, zero);
+        shifted += m.select(one, zero);
+    }
+
+    // polygamma_asymptotic(2, shifted), written in the same sequence as the scalar
+    // generic helper after substituting sign=-1, n_fact=2, fact(1)=1, and
+    // rising_factorial(2k+1, 1)=2k+1.
+    let inv = one / shifted;
+    let pow = inv * inv;
+    let mut sum = -pow;
+    let pow = pow * inv;
+    sum -= pow;
+    let inv2 = inv * inv;
+    let mut bpow = pow * inv;
+    const B: [f64; 6] = [
+        1.0 / 6.0,
+        -1.0 / 30.0,
+        1.0 / 42.0,
+        -1.0 / 30.0,
+        5.0 / 66.0,
+        -691.0 / 2730.0,
+    ];
+    const RISING: [f64; 6] = [3.0, 5.0, 7.0, 9.0, 11.0, 13.0];
+    for (&b, &rising) in B.iter().zip(RISING.iter()) {
+        sum -= F::splat(b * rising) * bpow;
+        bpow *= inv2;
+    }
+
+    let mut res = result + sum;
+    if !simd_ok.all() {
+        let xa = x.to_array();
+        let mut ra = res.to_array();
+        for k in 0..8 {
+            if !(xa[k] >= 0.5 && xa[k] < f64::INFINITY) {
+                ra[k] = polygamma_approx(2, xa[k]);
             }
         }
         res = F::from_array(ra);
@@ -13041,6 +13115,20 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
                                     for j in i..src.len() {
                                         blk[j] = polygamma_approx(1, src[j]);
                                     }
+                                } else if n == 2 {
+                                    use std::simd::Simd;
+                                    let n8 = src.len() - src.len() % 8;
+                                    let mut i = 0;
+                                    while i < n8 {
+                                        tetragamma_f64x8(Simd::<f64, 8>::from_slice(
+                                            &src[i..i + 8],
+                                        ))
+                                        .copy_to_slice(&mut blk[i..i + 8]);
+                                        i += 8;
+                                    }
+                                    for j in i..src.len() {
+                                        blk[j] = polygamma_approx(2, src[j]);
+                                    }
                                 } else {
                                     for (o, &v) in blk.iter_mut().zip(src) {
                                         *o = polygamma_approx(n, v);
@@ -13103,6 +13191,20 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
                                     }
                                     for j in i..src.len() {
                                         blk[j] = polygamma_approx(1, f64::from(src[j]));
+                                    }
+                                } else if n == 2 {
+                                    use std::simd::Simd;
+                                    use std::simd::num::SimdFloat;
+                                    let n8 = src.len() - src.len() % 8;
+                                    let mut i = 0;
+                                    while i < n8 {
+                                        let vf = Simd::<f32, 8>::from_slice(&src[i..i + 8]);
+                                        tetragamma_f64x8(vf.cast::<f64>())
+                                            .copy_to_slice(&mut blk[i..i + 8]);
+                                        i += 8;
+                                    }
+                                    for j in i..src.len() {
+                                        blk[j] = polygamma_approx(2, f64::from(src[j]));
                                     }
                                 } else {
                                     for (o, &v) in blk.iter_mut().zip(src) {
@@ -27065,6 +27167,48 @@ mod tests {
                     got[k].to_bits(),
                     expect.to_bits(),
                     "trigamma_f64x8 != scalar at x={x}: got {} expect {expect}",
+                    got[k]
+                );
+            }
+        }
+    }
+
+    /// `tetragamma_f64x8` must equal scalar `polygamma_approx(2, .)` bit-for-bit across the SIMD
+    /// regime and scalar-fallback lanes.
+    #[test]
+    fn polygamma_n2_tetragamma_f64x8_bit_identical_to_scalar() {
+        use std::simd::Simd;
+        let mut xs: Vec<f64> = Vec::new();
+        for i in 0..2048 {
+            xs.push(0.5 + i as f64 * 0.05);
+        }
+        for i in 0..512 {
+            xs.push(-9.97 + i as f64 * 0.013);
+        }
+        xs.extend_from_slice(&[
+            0.5,
+            0.25,
+            0.0001,
+            1.0,
+            2.0,
+            150.0,
+            1e6,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ]);
+        while xs.len() % 8 != 0 {
+            xs.push(1.5);
+        }
+        for chunk in xs.chunks_exact(8) {
+            let v = Simd::<f64, 8>::from_slice(chunk);
+            let got = super::tetragamma_f64x8(v).to_array();
+            for (k, &x) in chunk.iter().enumerate() {
+                let expect = polygamma_approx(2, x);
+                assert_eq!(
+                    got[k].to_bits(),
+                    expect.to_bits(),
+                    "tetragamma_f64x8 != scalar at x={x}: got {} expect {expect}",
                     got[k]
                 );
             }

@@ -2,6 +2,56 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 1.312x vs ORIG: tetragamma SIMD recurrence kernel (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided the
+  rejected Poisson convergence/table, producerless reducer, branchless select,
+  gather/scatter SIMD, FFT/radix, Cholesky/GEMM, row-wise interpreter
+  superinstructions, and the already-landed trigamma/special-function SIMD lanes.
+  Profile target was the remaining higher-order `polygamma(n=2)` dense tensor path:
+  the pre-edit ORIG row `eval/polygamma_n2_256k_f64` measured **22.529 ms**
+  midpoint on RCH worker `vmi1149989`. Graveyard/artifact mapping: order-specific
+  special-function recurrence plus masked SIMD lane automata, compiled as a
+  finite-domain tetragamma primitive rather than another generic scalar
+  Bernoulli/asymptotic loop.
+- LEVER: add an 8-wide `tetragamma_f64x8` kernel for finite `x >= 0.5`, matching
+  scalar `polygamma_approx(2, x)` operation order: exact recurrence terms
+  `-2.0 / shifted.powi(3)` until the asymptotic cutoff, then the fixed
+  `polygamma_asymptotic(2, shifted)` Bernoulli tail with constants specialized
+  for `n=2`. Reflection, nonfinite, and tail lanes fall back to scalar. Dense f64
+  `n=2` uses the kernel directly; dense f32 casts eight lanes to f64 and keeps
+  the existing f64 output contract.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`,
+  `rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline
+  'eval/polygamma_n2_256k_f64' -- --warm-up-time 1 --measurement-time 2
+  --sample-size 10 --noplot`). RCH first failed open locally for a candidate
+  sanity row (**3.7620 ms**, Criterion change `-85.315%`), then produced a remote
+  candidate row on `vmi1227854`. The ratio below uses only remote rows, with the
+  worker split stated explicitly.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG scalar generic `eval/polygamma_n2_256k_f64` | `vmi1149989` | 22.529 ms | 19.932-27.160 ms |
+  | candidate tetragamma SIMD `eval/polygamma_n2_256k_f64` | `vmi1227854` | 17.174 ms | 16.753-17.543 ms |
+
+  Ratio vs ORIG: **0.762x time / 1.312x faster** by midpoint. Conservative
+  cross-worker CI floor: `19.932 / 17.543 = 1.136x`; intervals are separated.
+- VALIDATION: `rch exec -- cargo test -p fj-lax --profile release polygamma --lib
+  -- --nocapture` GREEN on `vmi1167313` (7 passed, 1 ignored), covering the new
+  tetragamma exactness guard and existing dense `n=2` production parity tests.
+  Byte-exact conformance GREEN: `rch exec -- cargo test -p fj-conformance --profile
+  release -- --nocapture` on `ovh-a` (all tests and doc-tests passed).
+  `rustfmt --edition 2024 --check crates/fj-lax/src/arithmetic.rs` and
+  `git diff --check -- crates/fj-lax/src/arithmetic.rs` GREEN after the
+  implementation. `rch exec -- cargo check -p fj-lax --profile release --all-targets`
+  GREEN on `hz2`, with pre-existing unrelated `fj-lax` warnings. `ubs` on the
+  touched files returns non-zero on broad existing panic/indexing/cast heuristics
+  in the large `arithmetic.rs`, while its embedded fmt/clippy/check/test-build,
+  audit, and deny subchecks were clean. Remaining `fj-lax` warnings in
+  `reduction.rs` and `linalg.rs` are pre-existing unrelated debt and were not
+  broadened into this lever.
+
 ## 2026-07-09 - WIN 1.059x vs ORIG: BF16 convert bit-rounding transducer (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided the
