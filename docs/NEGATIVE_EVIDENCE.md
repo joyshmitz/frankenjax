@@ -2,6 +2,54 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - NO-SHIP: large-vector direct f64 tensor-add DAG evaluator regressed vs ORIG (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-backend-cpu`. Consulted this ledger first and
+  avoided the closed `fj-lax` maxpool, softmax/log-softmax, cumsum/AD
+  chain-cumsum, dense f64 serde, Scan SIMD, Slice copy, Poisson,
+  special-function, BF16, one-hot, FFT, sort, SVD, row-wise interpreter,
+  gather/scatter, branchless select, and related lanes. A short cross-crate
+  profile picked `backend_scheduler_tensor_shapes/tensor_branched_fanin/16x4x4096`
+  as the hottest clean residual row: local fail-open profile midpoint
+  `1.6394 ms` (`1.5746-1.7200 ms`). `fj-dispatch` topped out at `104.81 us`
+  on `vmap_eigh/batched_matrix_3x3`, and `fj-api` topped out at `78.573 us`
+  on `jit_compiled_eval_cache_tensor/dispatch_prepared/reduce_sum`.
+- LEVER TRIED: a graveyard §8.2 vectorized-execution/morsel-style direct
+  evaluator for terminal f64 tensor-add DAGs. The existing backend already has
+  a small direct f64 tensor-add DAG compiler gated to `segment_len >= 128` and
+  `len <= 128`; the experiment extended that compiler to large vector payloads
+  and called it before the scan scheduler for terminal DAGs like the hot
+  `16x4x4096` fan-in shape. A hidden same-binary legacy executor preserved the
+  original scheduler path for ORIG measurement.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-backend-cpu --profile release --bench backend_baseline
+  'backend_scheduler_tensor_shapes/tensor_branched_fanin(_legacy)?/16x4x4096$'
+  -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`). ORIG
+  and candidate are same-worker, same-binary rows on `ovh-a`.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG legacy scheduler `backend_scheduler_tensor_shapes/tensor_branched_fanin_legacy/16x4x4096` | `ovh-a` | 248.13 us | 245.58-250.11 us |
+  | candidate direct large-vector DAG `backend_scheduler_tensor_shapes/tensor_branched_fanin/16x4x4096` | `ovh-a` | 403.45 us | 403.11-403.76 us |
+
+  Ratio vs ORIG: **1.626x time / 0.615x speed** by midpoint, so this is a
+  decisive regression. The likely cause is that the existing scheduler/lax
+  tensor add path already streams this medium vector well, while the direct
+  element-major DAG interpreter forfeits cache-friendly per-operator vector
+  loops and pays slot-dispatch overhead per element. Candidate code, hidden
+  legacy hook, and comparator bench row were reverted.
+- VALIDATION: focused candidate parity test was GREEN before revert with the
+  requested wrapper on `ovh-a`: `cargo test -p fj-backend-cpu --profile release
+  dependency_scheduler_large_f64_tensor_add_dag_matches_legacy_bits --lib --
+  --nocapture` (1 passed). No code remains from the rejected lever; this
+  ledger-only closeout exists to prevent re-trying large-vector direct
+  f64 tensor-add DAG evaluation in this shape without a different data-layout
+  argument. Byte-exact conformance GREEN after revert with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed).
+
 ## 2026-07-09 - WIN 1.85x vs ORIG: streaming row-ring 7x7 f64 maxpool (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and
