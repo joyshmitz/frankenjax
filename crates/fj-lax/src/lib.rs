@@ -5612,6 +5612,118 @@ fn separable_reduce_window_rank2_maxmin_f64(
     Some(output)
 }
 
+/// Streaming row-ring rank-2 f64 max/min for the hot 7x7 VALID/unit-stride
+/// maxpool shape. It keeps the horizontal van Herk pass, but replaces the full
+/// vertical prefix/suffix planes with a `window_rows`-row ring and emits each
+/// output row as soon as its vertical window is resident.
+#[allow(clippy::too_many_arguments)]
+fn streaming_ring_reduce_window_rank2_maxmin_f64(
+    src: &[f64],
+    input_rows: usize,
+    input_cols: usize,
+    out_rows: usize,
+    out_cols: usize,
+    window_rows: usize,
+    window_cols: usize,
+    stride_rows: usize,
+    stride_cols: usize,
+    pad_rows: usize,
+    pad_cols: usize,
+    is_max: bool,
+) -> Option<Vec<f64>> {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+
+    if stride_rows != 1
+        || stride_cols != 1
+        || pad_rows != 0
+        || pad_cols != 0
+        || window_rows != 7
+        || window_cols != 7
+        || out_rows + window_rows != input_rows + 1
+        || out_cols + window_cols != input_cols + 1
+        || out_cols < 8
+        || src.len() != input_rows.checked_mul(input_cols)?
+        || !src.iter().all(|v| v.is_finite())
+    {
+        return None;
+    }
+
+    let init = if is_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let sop = |a: f64, b: f64| if is_max { a.max(b) } else { a.min(b) };
+    let vop = |a: Simd<f64, 8>, b: Simd<f64, 8>| {
+        if is_max { a.simd_max(b) } else { a.simd_min(b) }
+    };
+
+    let mut pref = vec![init; input_cols];
+    let mut suf = vec![init; input_cols];
+    let mut ring = vec![init; window_rows * out_cols];
+    let mut output = vec![init; out_rows * out_cols];
+
+    for r in 0..input_rows {
+        let row = &src[r * input_cols..(r + 1) * input_cols];
+        let mut bs = 0usize;
+        while bs < input_cols {
+            let be = (bs + window_cols).min(input_cols);
+            pref[bs] = row[bs];
+            for j in bs + 1..be {
+                pref[j] = sop(pref[j - 1], row[j]);
+            }
+            bs = be;
+        }
+
+        let mut bs = 0usize;
+        while bs < input_cols {
+            let be = (bs + window_cols).min(input_cols);
+            suf[be - 1] = row[be - 1];
+            let mut j = be - 1;
+            while j > bs {
+                j -= 1;
+                suf[j] = sop(suf[j + 1], row[j]);
+            }
+            bs = be;
+        }
+
+        let ring_base = (r % window_rows) * out_cols;
+        for oc in 0..out_cols {
+            ring[ring_base + oc] = sop(suf[oc], pref[oc + window_cols - 1]);
+        }
+
+        if r + 1 < window_rows {
+            continue;
+        }
+
+        let out_row = r + 1 - window_rows;
+        let out_base = out_row * out_cols;
+        let mut oc = 0usize;
+        while oc + 8 <= out_cols {
+            let mut acc = Simd::<f64, 8>::splat(init);
+            for wr in 0..window_rows {
+                let source_row = out_row + wr;
+                let rb = (source_row % window_rows) * out_cols + oc;
+                acc = vop(acc, Simd::<f64, 8>::from_slice(&ring[rb..rb + 8]));
+            }
+            acc.copy_to_slice(&mut output[out_base + oc..out_base + oc + 8]);
+            oc += 8;
+        }
+        while oc < out_cols {
+            let mut acc = init;
+            for wr in 0..window_rows {
+                let source_row = out_row + wr;
+                acc = sop(acc, ring[(source_row % window_rows) * out_cols + oc]);
+            }
+            output[out_base + oc] = acc;
+            oc += 1;
+        }
+    }
+
+    Some(output)
+}
+
 /// Direct SIMD rank-2 max/min for 3x3 VALID windows.
 ///
 /// This is the opposite point in the design space from van Herk: it rereads the
@@ -9049,6 +9161,9 @@ fn eval_reduce_window(
 
     // Determine reduction operation
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
+    let rank2_f64_maxmin_legacy = params
+        .get("__fj_rank2_f64_maxmin_legacy")
+        .is_some_and(|value| value == "1");
     // Fail closed on unknown reducers: only sum/max/min are implemented. Without this an
     // unrecognized reduce_op (e.g. "mul"/"prod" or a typo) silently falls through to the
     // sum accumulator (init 0, wrapping_add), computing a wrong result with no error.
@@ -9432,6 +9547,44 @@ fn eval_reduce_window(
         && output_dtype == fj_core::DType::F64
         && let Some(src) = reduce_window_dense_f64_view(tensor)
         && let Some(values) = direct_simd_rank2_maxmin_f64(
+            src.as_ref(),
+            tensor.shape.dims[0] as usize,
+            tensor.shape.dims[1] as usize,
+            out_dims[0] as usize,
+            out_dims[1] as usize,
+            window_dims[0],
+            window_dims[1],
+            strides[0],
+            strides[1],
+            pad_lows[0],
+            pad_lows[1],
+            reduce_op == "max",
+        )
+    {
+        return Ok(Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: out_dims.clone(),
+                },
+                values,
+            )
+            .map_err(EvalError::from)?,
+        ));
+    }
+
+    // Rank-2 f64 7x7 VALID max/min: streaming horizontal-van-Herk row ring.
+    // This is the same finite/idempotent proof as the block-structured path below,
+    // but avoids materializing full vertical prefix/suffix planes for the hot
+    // image-pool row. The private legacy knob is benchmark-only and falls through
+    // to the old block-van-Herk implementation in this same binary.
+    if !rank2_f64_maxmin_legacy
+        && no_base_dilation
+        && no_window_dilation
+        && rank == 2
+        && matches!(reduce_op, "max" | "min")
+        && output_dtype == fj_core::DType::F64
+        && let Some(src) = reduce_window_dense_f64_view(tensor)
+        && let Some(values) = streaming_ring_reduce_window_rank2_maxmin_f64(
             src.as_ref(),
             tensor.shape.dims[0] as usize,
             tensor.shape.dims[1] as usize,
@@ -14001,7 +14154,7 @@ mod tests {
             }
             out
         };
-        for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6), (3, 3), (3, 4)] {
+        for &(wr, wc) in &[(7usize, 7usize), (7, 5), (5, 7), (6, 6), (3, 3), (3, 4)] {
             for &is_max in &[true, false] {
                 // (pad_r, pad_c, stride_r, stride_c): unit + same-pad + strided-VALID variants.
                 for &(pr, pc, sr, sc) in &[
@@ -14022,6 +14175,17 @@ mod tests {
                         got, want,
                         "van Herk diverges: w={wr}x{wc} pad={pr},{pc} stride={sr},{sc} is_max={is_max}"
                     );
+                    if (wr, wc, pr, pc, sr, sc) == (7, 7, 0, 0, 1, 1) {
+                        let ring = super::streaming_ring_reduce_window_rank2_maxmin_f64(
+                            &src, rows, cols, out_rows, out_cols, wr, wc, sr, sc, pr, pc, is_max,
+                        )
+                        .expect("streaming ring should engage for finite 7x7 valid");
+                        assert_eq!(
+                            ring.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                            "streaming ring diverges: is_max={is_max}"
+                        );
+                    }
                 }
             }
         }
@@ -26133,9 +26297,9 @@ mod tests {
 
     #[test]
     fn reduce_window_separable_maxmin_matches_generic() {
-        // The separable max/min fast path (dense input, ∏window > 2·∑window) must equal the
+        // The separable max/min fast paths (dense input, ∏window > 2·∑window) must equal the
         // generic per-`Literal` loop (boxed input bypasses every dense path) bit-for-bit.
-        // Covers rank-4 NHWC 7×7 + rank-2 5×5, max & min, VALID + SAME padding + stride 2.
+        // Covers rank-4 NHWC 7×7 + rank-2 5×5/7x7, max & min, VALID + SAME padding + stride 2.
         let data = |n: usize| -> Vec<f64> {
             (0..n)
                 .map(|i| (i as f64 * 0.137).sin() * 3.0 - (i as f64 * 0.0411).cos())
@@ -26153,6 +26317,7 @@ mod tests {
             (vec![1, 16, 16, 4], "1,7,7,1", "1,1,1,1", "VALID"),
             (vec![1, 16, 16, 4], "1,7,7,1", "1,2,2,1", "SAME"),
             (vec![18, 18], "5,5", "1,1", "VALID"),
+            (vec![18, 18], "7,7", "1,1", "VALID"),
             (vec![18, 18], "5,5", "2,2", "SAME"),
         ];
         for (dims, window, strides, pad) in cases {

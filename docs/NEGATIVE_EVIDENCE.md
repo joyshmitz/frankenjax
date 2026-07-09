@@ -2,6 +2,65 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 1.85x vs ORIG: streaming row-ring 7x7 f64 maxpool (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and
+  avoided the rejected dense complex broadcast, Poisson convergence/table,
+  producerless reducer, branchless select, gather/scatter SIMD, FFT/radix,
+  Cholesky/GEMM, cumsum-family raw kernels and AD chain-cumsum, row-wise
+  interpreter superinstructions, special-function sibling lanes, BF16 convert,
+  pad/calloc, bitcast/rev/one-hot, dense f64 serde, Scan SIMD, threaded Slice
+  copy, and the already-optimized softmax/log-softmax rows. A focused
+  window-reduction profile selected `eval/maxpool2d_1024x1024_w7s1_valid_f64`
+  as the hottest eligible row: 17.743 ms midpoint on `vmi1167313`
+  (16.136-19.495 ms), ahead of the i64 maxpool rows around 15 ms and f64
+  sumpool rows around 7 ms.
+- LEVER: treat finite VALID rank-2 7x7 f64 max/min pooling as a streaming
+  row-ring extremum transducer. The old block van Herk path materialized full
+  horizontal and vertical prefix/suffix planes; the new path keeps only
+  `window_rows` horizontal van Herk rows in a ring and emits each output row as
+  soon as its vertical window is resident, SIMD-comparing eight columns at a
+  time. It is gated to finite f64, VALID padding, unit stride, exact 7x7
+  geometry, and dense storage; every other shape/dtype/padding/non-finite case
+  falls through. A private `__fj_rank2_f64_maxmin_legacy=1` benchmark parameter
+  keeps the old block van Herk path available for same-binary ORIG
+  measurement.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-lax --profile release --bench lax_baseline
+  'eval/maxpool2d_1024x1024_w7s1_valid_f64(_legacy)?$' -- --warm-up-time 1
+  --measurement-time 3 --sample-size 10 --noplot`). ORIG and candidate are
+  same-worker, same-binary rows from `hz2`.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG legacy block van Herk `eval/maxpool2d_1024x1024_w7s1_valid_f64_legacy` | `hz2` | 4.9710 ms | 4.7825-5.1332 ms |
+  | candidate streaming ring `eval/maxpool2d_1024x1024_w7s1_valid_f64` | `hz2` | 2.6831 ms | 2.6325-2.7737 ms |
+
+  Ratio vs ORIG: **0.540x time / 1.85x faster** by midpoint. Conservative CI
+  floor: `4.7825 / 2.7737 = 1.72x`.
+- VALIDATION: focused helper proof GREEN with the requested wrapper on `hz2`:
+  `cargo test -p fj-lax --profile release
+  van_herk_rank2_maxmin_matches_naive --lib -- --nocapture` (1 passed).
+  Focused max/min dispatch tests GREEN with the requested wrapper on
+  `vmi1149989`: `cargo test -p fj-lax --profile release maxmin --lib --
+  --nocapture` (11 passed, 2 ignored). Byte-exact conformance GREEN with the
+  requested wrapper on `vmi1227854`: `cargo test -p fj-conformance --profile
+  release -- --nocapture` (all tests and doc-tests passed; the first library
+  block reported 45 passed). `cargo fmt -p fj-lax -- --check`, `git diff
+  --check`, and `cargo check -p fj-lax --profile release --all-targets` were
+  GREEN; the check displayed only known pre-existing `fj-lax` warnings in
+  unrelated `reduction.rs` and `linalg.rs` code. `cargo clippy -p fj-lax
+  --profile release --all-targets --no-deps -- -D warnings` was blocked by
+  broad pre-existing `fj-lax` lint debt across unrelated arithmetic, linalg,
+  reduction, simd_exp, tensor_ops, and old test code; no new row-ring helper
+  finding appeared before the run aborted. UBS over `crates/fj-lax/src/lib.rs`,
+  `crates/fj-lax/benches/lax_baseline.rs`, and this ledger file exited
+  non-zero on broad pre-existing inventories in the large source/bench files:
+  panic/unwrap, equality, clone, cast, indexing, and allocation surfaces. Its
+  embedded formatting, clippy, cargo-check, test-build, audit, and deny
+  subchecks were clean.
+
 ## 2026-07-09 - WIN 1.27x vs ORIG: phase-reused log-softmax exp-buffer transducer (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and

@@ -5530,6 +5530,17 @@ fn bench_pool_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/maxpool2d_1024x1024_w7s1_valid_f64", |b| {
         b.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&m), &p_max7))
     });
+    let mut p_max7_legacy = p_max7.clone();
+    p_max7_legacy.insert("__fj_rank2_f64_maxmin_legacy".to_owned(), "1".to_owned());
+    c.bench_function("eval/maxpool2d_1024x1024_w7s1_valid_f64_legacy", |b| {
+        b.iter(|| {
+            eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&m),
+                &p_max7_legacy,
+            )
+        })
+    });
     // w3 overlapping maxpool (9 taps): below both the deque gate (9 !> 2*6) and the van Herk >=25 gate,
     // so it falls to the scalar naive fold. Same-run vs w7 (van Herk) exposes the dispatch gap.
     let mut p_max3 = BTreeMap::new();
