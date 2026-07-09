@@ -799,6 +799,100 @@ fn build_mean_absolute_error_2d_jaxpr(cols: usize) -> Jaxpr {
     )
 }
 
+fn build_huber_loss_2d_jaxpr() -> Jaxpr {
+    let a = VarId(1);
+    let b = VarId(2);
+    let diff = VarId(3);
+    let abs = VarId(4);
+    let sq = VarId(5);
+    let quad = VarId(6);
+    let shifted = VarId(7);
+    let linear = VarId(8);
+    let cond = VarId(9);
+    let loss = VarId(10);
+    let out = VarId(11);
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    Jaxpr::new(
+        vec![a, b],
+        vec![],
+        vec![out],
+        vec![
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(a), Atom::Var(b)],
+                outputs: smallvec::smallvec![diff],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Abs,
+                inputs: smallvec::smallvec![Atom::Var(diff)],
+                outputs: smallvec::smallvec![abs],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Var(diff), Atom::Var(diff)],
+                outputs: smallvec::smallvec![sq],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Lit(Literal::from_f64(0.5)), Atom::Var(sq)],
+                outputs: smallvec::smallvec![quad],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec::smallvec![Atom::Var(abs), Atom::Lit(Literal::from_f64(0.5))],
+                outputs: smallvec::smallvec![shifted],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec::smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(shifted)],
+                outputs: smallvec::smallvec![linear],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Le,
+                inputs: smallvec::smallvec![Atom::Var(abs), Atom::Lit(Literal::from_f64(1.0))],
+                outputs: smallvec::smallvec![cond],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Select,
+                inputs: smallvec::smallvec![Atom::Var(cond), Atom::Var(quad), Atom::Var(linear)],
+                outputs: smallvec::smallvec![loss],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec::smallvec![Atom::Var(loss)],
+                outputs: smallvec::smallvec![out],
+                params: reduce_axis1,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+    )
+}
+
 fn build_chi_squared_distance_2d_jaxpr() -> Jaxpr {
     let a = VarId(1);
     let b = VarId(2);
@@ -3257,6 +3351,34 @@ fn eval_mean_absolute_error_2d_decomposed(a: &Value, b: &Value, cols: usize) -> 
     eval_primitive(Primitive::Div, &[s, Value::scalar_f64(cols as f64)], &empty).expect("mae")
 }
 
+fn eval_huber_loss_2d_decomposed(a: &Value, b: &Value) -> Value {
+    let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+    let empty = BTreeMap::new();
+    let diff = eval_primitive(Primitive::Sub, &[a.clone(), b.clone()], &empty).expect("a-b");
+    let abs = eval_primitive(Primitive::Abs, std::slice::from_ref(&diff), &empty).expect("abs");
+    let sq = eval_primitive(Primitive::Mul, &[diff.clone(), diff], &empty).expect("square");
+    let quad =
+        eval_primitive(Primitive::Mul, &[Value::scalar_f64(0.5), sq], &empty).expect("half square");
+    let shifted = eval_primitive(
+        Primitive::Sub,
+        &[abs.clone(), Value::scalar_f64(0.5)],
+        &empty,
+    )
+    .expect("abs - half");
+    let linear = eval_primitive(Primitive::Mul, &[Value::scalar_f64(1.0), shifted], &empty)
+        .expect("linear branch");
+    let cond =
+        eval_primitive(Primitive::Le, &[abs, Value::scalar_f64(1.0)], &empty).expect("abs <= 1");
+    let loss =
+        eval_primitive(Primitive::Select, &[cond, quad, linear], &empty).expect("select loss");
+    eval_primitive(
+        Primitive::ReduceSum,
+        std::slice::from_ref(&loss),
+        &reduce_axis1,
+    )
+    .expect("huber sum")
+}
+
 fn eval_chi_squared_distance_2d_decomposed(a: &Value, b: &Value) -> Value {
     let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
     let empty = BTreeMap::new();
@@ -4438,6 +4560,19 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     });
     group.bench_function("mean_absolute_error_2d/fast_eval_jaxpr_4096x1024", |b| {
         b.iter(|| black_box(eval_jaxpr(black_box(&mae_jaxpr), black_box(&mae_args)).unwrap()))
+    });
+    let huber_jaxpr = build_huber_loss_2d_jaxpr();
+    let huber_args = [softmax_input.clone(), layer_norm_input.clone()];
+    group.bench_function("huber_loss_2d/orig_decomposed_4096x1024", |b| {
+        b.iter(|| {
+            black_box(eval_huber_loss_2d_decomposed(
+                black_box(&huber_args[0]),
+                black_box(&huber_args[1]),
+            ))
+        })
+    });
+    group.bench_function("huber_loss_2d/fast_eval_jaxpr_4096x1024", |b| {
+        b.iter(|| black_box(eval_jaxpr(black_box(&huber_jaxpr), black_box(&huber_args)).unwrap()))
     });
     let chi2_jaxpr = build_chi_squared_distance_2d_jaxpr();
     let chi2_args = [softmax_input.clone(), layer_norm_input.clone()];

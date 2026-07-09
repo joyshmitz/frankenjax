@@ -1374,6 +1374,24 @@ fn mean_absolute_error_row(a: &[f64], b: &[f64]) -> f64 {
     sum_abs / (a.len() as f64)
 }
 
+/// Huber / smooth-L1 loss of a single pair of rows for delta=1:
+/// `Σ select(|a-b| <= 1, 0.5*(a-b)^2, 1.0*(|a-b|-0.5))`.
+/// This preserves the decomposed graph's element grouping and row-order sum.
+fn huber_loss_row(a: &[f64], b: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for (&av, &bv) in a.iter().zip(b.iter()) {
+        let diff = av - bv;
+        let abs = diff.abs();
+        let sq = diff * diff;
+        let quadratic = 0.5 * sq;
+        let shifted = abs - 0.5;
+        let linear = 1.0 * shifted;
+        let loss = if abs <= 1.0 { quadratic } else { linear };
+        sum += loss;
+    }
+    sum
+}
+
 /// Mean squared error along the last axis of two 2D arrays, one scalar per row.
 #[must_use]
 pub fn mean_squared_error_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
@@ -1501,6 +1519,52 @@ pub fn mean_absolute_error_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) ->
                 for (k, out_slot) in out_block.iter_mut().enumerate() {
                     let start = k * cols;
                     *out_slot = mean_absolute_error_row(
+                        &a_block[start..start + cols],
+                        &b_block[start..start + cols],
+                    );
+                }
+            });
+        }
+    });
+    result
+}
+
+/// Huber / smooth-L1 loss along the last axis of two 2D arrays, one scalar per row. ROW-PARALLEL
+/// and BIT-IDENTICAL to the delta=1 decomposed graph:
+/// `Sub -> Abs | Mul(square) -> Mul(0.5) | Sub(0.5) -> Mul(1.0) | Le(1.0) -> Select -> ReduceSum`.
+/// Used by the interpreter Huber-loss superinstruction.
+#[must_use]
+pub fn huber_loss_2d(a: &[f64], b: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let _ = checked_2d_row_major_len("2D huber_loss a", a, rows, cols);
+    let _ = checked_2d_row_major_len("2D huber_loss b", b, rows, cols);
+    let mut result = vec![0.0; rows];
+    if cols == 0 || rows == 0 {
+        return result;
+    }
+    let threads = softmax_2d_thread_count(rows, rows * cols);
+    if threads <= 1 {
+        for (i, slot) in result.iter_mut().enumerate() {
+            let start = i * cols;
+            *slot = huber_loss_row(&a[start..start + cols], &b[start..start + cols]);
+        }
+        return result;
+    }
+
+    let rows_per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut out_rest: &mut [f64] = &mut result;
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let row_count = rows_per.min(rows - row0);
+            let (out_block, out_tail) = out_rest.split_at_mut(row_count);
+            out_rest = out_tail;
+            let a_block = &a[row0 * cols..(row0 + row_count) * cols];
+            let b_block = &b[row0 * cols..(row0 + row_count) * cols];
+            row0 += row_count;
+            scope.spawn(move || {
+                for (k, out_slot) in out_block.iter_mut().enumerate() {
+                    let start = k * cols;
+                    *out_slot = huber_loss_row(
                         &a_block[start..start + cols],
                         &b_block[start..start + cols],
                     );

@@ -2,6 +2,51 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 14.29x vs ORIG: row-wise Huber/smooth-L1 robust-loss superinstruction (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::huber_loss_2d`).
+  Consulted this ledger first and avoided the rejected producerless reducer, branchless-select,
+  FFT/rFFT, Cholesky, gather-SIMD, Poisson lookup-table, and already-landed row-metric lanes.
+  Profiling target was the decomposed row-wise interpreter metric-loss family: a bench-only
+  baseline before the recognizer measured `huber_loss_2d/orig_decomposed_4096x1024` at 171.51 ms
+  and pre-recognizer `fast_eval_jaxpr` at 173.55 ms on the local fail-open RCH path. Graveyard /
+  artifact mapping: robust-statistics primitives (Huber/Catoni-style M-estimators) plus convex
+  piecewise quadratic/linear loss, compiled into a row-local interpreter superinstruction.
+- LEVER: top-level recognizer matches the exact dense finite f64 rank-2 delta=1 graph
+  `Sub(a,b) -> Abs | Mul(diff,diff) -> Mul(0.5) | Sub(abs,0.5) -> Mul(1.0) |
+  Le(abs,1.0) -> Select(quadratic,linear) -> ReduceSum(axis=1)` and dispatches to one
+  row-parallel kernel. The helper preserves the graph's operation grouping (`0.5 * sq`,
+  `1.0 * (abs - 0.5)`, `abs <= 1.0`) and row-order sum; graph, dtype, shape, empty, or
+  nonfinite-input mismatches fall through to the generic interpreter.
+  The decomposed path materializes seven full f64 [rows,cols] intermediates plus the bool mask;
+  the keep removes that materialization and the per-equation interpreter traffic.
+- MEASURED per-crate (`rch exec`, worker `vmi1227854`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `AGENT_NAME=BlackThrush`,
+  `cargo bench -p fj-interpreters --profile release --bench compiled_dispatch_speed
+  huber_loss_2d -- --warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`).
+
+  | row | median | CI |
+  | --- | ---: | ---: |
+  | `compiled_dispatch/huber_loss_2d/orig_decomposed_4096x1024` | 112.89 ms | 106.92-119.79 ms |
+  | `compiled_dispatch/huber_loss_2d/fast_eval_jaxpr_4096x1024` | 7.9010 ms | 7.3975-8.6760 ms |
+
+  Ratio vs ORIG: **0.0700x time / 14.29x faster** by midpoint. Conservative CI floor:
+  `106.92 / 8.6760 = 12.32x`; intervals are separated.
+- VALIDATION: `cargo fmt --check -p fj-lax -p fj-interpreters` GREEN.
+  `rch exec -- cargo test -p fj-interpreters --profile release
+  eval_top_level_huber_loss_2d_f64_matches_generic_and_preserves_edges --lib` GREEN on the
+  RCH fail-open local path (1 passed), covering both Huber branches and nonfinite fall-through.
+  Byte-exact conformance GREEN: `rch exec -- cargo test -p fj-conformance --profile release
+  -- --nocapture` on the RCH fail-open local path (all tests and doctests passed).
+  `rch exec -- cargo check -p fj-lax -p fj-interpreters --all-targets` GREEN on `ovh-a`
+  with pre-existing unrelated `fj-lax` warnings. `rch exec -- cargo clippy -p fj-interpreters
+  --all-targets -- -D warnings` was discarded once on `ovh-b` due to dependency build-script
+  `SIGILL`, then the local rerun failed before the changed interpreter crate on existing
+  `fj-trace`/`fj-lax` lint debt (`chunks_exact`, unused imports, excessive precision,
+  doc-lazy-continuation, etc.). `ubs` on touched files exits non-zero on broad existing
+  panic/JWT/indexing heuristics in these large files; its embedded fmt/clippy/check/test subchecks
+  were clean.
+
 ## 2026-07-08 - WIN 9.86x vs ORIG: row-wise binary cross-entropy fused interpreter superinstruction (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-interpreters` (+ `fj-lax::nn::binary_cross_entropy_2d`).

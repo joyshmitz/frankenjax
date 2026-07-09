@@ -1198,6 +1198,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_huber_loss_2d_f64(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_top_level_chi_squared_distance_2d_f64(jaxpr, const_values, args)
     {
         return result;
@@ -4239,6 +4243,141 @@ fn try_eval_top_level_mean_absolute_error_2d_f64(
     }
 
     let output = fj_lax::nn::mean_absolute_error_2d(a_v, b_v, rows, cols);
+    Some(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32],
+            },
+            output,
+        )
+        .map(Value::Tensor)
+        .map(|value| vec![value])
+        .map_err(EvalError::InvalidTensor)
+        .map_err(InterpreterError::Primitive),
+    )
+}
+
+/// Interpreter superinstruction for row-wise Huber / smooth-L1 loss with delta=1:
+/// `Σ select(|a-b| <= 1, 0.5*(a-b)^2, 1.0*(|a-b|-0.5))` along the last axis. This exact
+/// 9-equation, TWO-input graph materializes seven full [rows,cols] intermediates plus a bool mask
+/// in the decomposed path; the fused helper streams each row once and writes one [rows] output.
+/// Finite dense rank-2 f64 only, else falls through.
+fn try_eval_top_level_huber_loss_2d_f64(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 9
+        || args.len() != 2
+    {
+        return None;
+    }
+
+    let a = jaxpr.invars[0];
+    let b = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [
+        sub_eq,
+        abs_eq,
+        sq_eq,
+        quad_eq,
+        shift_eq,
+        linear_eq,
+        cond_eq,
+        select_eq,
+        sum_eq,
+    ] = jaxpr.equations.as_slice()
+    else {
+        return None;
+    };
+
+    let diff = single_output_for_primitive(sub_eq, Primitive::Sub)?;
+    if sub_eq.inputs.as_slice() != [Atom::Var(a), Atom::Var(b)] {
+        return None;
+    }
+    let abs = single_output_for_primitive(abs_eq, Primitive::Abs)?;
+    if abs_eq.inputs.as_slice() != [Atom::Var(diff)] {
+        return None;
+    }
+    let sq = single_output_for_primitive(sq_eq, Primitive::Mul)?;
+    if sq_eq.inputs.as_slice() != [Atom::Var(diff), Atom::Var(diff)] {
+        return None;
+    }
+    let quad = single_output_for_primitive(quad_eq, Primitive::Mul)?;
+    let half_times_sq = match quad_eq.inputs.as_slice() {
+        [literal, Atom::Var(var)] if *var == sq => f64_literal(literal)?.to_bits(),
+        [Atom::Var(var), literal] if *var == sq => f64_literal(literal)?.to_bits(),
+        _ => return None,
+    };
+    if half_times_sq != 0.5f64.to_bits() {
+        return None;
+    }
+    let shifted = single_output_for_primitive(shift_eq, Primitive::Sub)?;
+    let [Atom::Var(shift_lhs), shift_rhs] = shift_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *shift_lhs != abs || f64_literal(shift_rhs)?.to_bits() != 0.5f64.to_bits() {
+        return None;
+    }
+    let linear = single_output_for_primitive(linear_eq, Primitive::Mul)?;
+    let one_times_shifted = match linear_eq.inputs.as_slice() {
+        [literal, Atom::Var(var)] if *var == shifted => f64_literal(literal)?.to_bits(),
+        [Atom::Var(var), literal] if *var == shifted => f64_literal(literal)?.to_bits(),
+        _ => return None,
+    };
+    if one_times_shifted != 1.0f64.to_bits() {
+        return None;
+    }
+    let cond = single_output_for_primitive(cond_eq, Primitive::Le)?;
+    let [Atom::Var(cond_lhs), cond_rhs] = cond_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *cond_lhs != abs || f64_literal(cond_rhs)?.to_bits() != 1.0f64.to_bits() {
+        return None;
+    }
+    let loss = single_output_for_primitive(select_eq, Primitive::Select)?;
+    if select_eq.inputs.as_slice() != [Atom::Var(cond), Atom::Var(quad), Atom::Var(linear)] {
+        return None;
+    }
+    let summed = single_output_for_param_primitive(sum_eq, Primitive::ReduceSum)?;
+    if summed != out
+        || sum_eq.inputs.as_slice() != [Atom::Var(loss)]
+        || !axis1_reduce_params(&sum_eq.params)
+    {
+        return None;
+    }
+
+    let Value::Tensor(a_t) = &args[0] else {
+        return None;
+    };
+    let Value::Tensor(b_t) = &args[1] else {
+        return None;
+    };
+    if a_t.dtype != DType::F64
+        || b_t.dtype != DType::F64
+        || a_t.shape.dims.len() != 2
+        || b_t.shape.dims != a_t.shape.dims
+    {
+        return None;
+    }
+    let rows = a_t.shape.dims[0] as usize;
+    let cols = a_t.shape.dims[1] as usize;
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+
+    let a_v = a_t.elements.as_f64_slice()?;
+    let b_v = b_t.elements.as_f64_slice()?;
+    if !a_v.iter().all(|value| value.is_finite()) || !b_v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let output = fj_lax::nn::huber_loss_2d(a_v, b_v, rows, cols);
     Some(
         TensorValue::new_f64_values(
             Shape {
@@ -24087,6 +24226,100 @@ mod tests {
         )
     }
 
+    fn make_huber_loss_2d_jaxpr() -> Jaxpr {
+        let a = VarId(1);
+        let b = VarId(2);
+        let diff = VarId(3);
+        let abs = VarId(4);
+        let sq = VarId(5);
+        let quad = VarId(6);
+        let shifted = VarId(7);
+        let linear = VarId(8);
+        let cond = VarId(9);
+        let loss = VarId(10);
+        let out = VarId(11);
+        let reduce_axis1 = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+                    outputs: smallvec![diff],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Abs,
+                    inputs: smallvec![Atom::Var(diff)],
+                    outputs: smallvec![abs],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(diff), Atom::Var(diff)],
+                    outputs: smallvec![sq],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(0.5)), Atom::Var(sq)],
+                    outputs: smallvec![quad],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Sub,
+                    inputs: smallvec![Atom::Var(abs), Atom::Lit(Literal::from_f64(0.5))],
+                    outputs: smallvec![shifted],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Lit(Literal::from_f64(1.0)), Atom::Var(shifted)],
+                    outputs: smallvec![linear],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Le,
+                    inputs: smallvec![Atom::Var(abs), Atom::Lit(Literal::from_f64(1.0))],
+                    outputs: smallvec![cond],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Select,
+                    inputs: smallvec![Atom::Var(cond), Atom::Var(quad), Atom::Var(linear)],
+                    outputs: smallvec![loss],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(loss)],
+                    outputs: smallvec![out],
+                    params: reduce_axis1,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
     fn make_mean_error_2d_jaxpr(cols: usize) -> Jaxpr {
         let a = VarId(1);
         let b = VarId(2);
@@ -24296,6 +24529,49 @@ mod tests {
             eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()]).expect("nonfinite mae falls through");
         let through_generic =
             eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite mae");
+        assert_eq!(through_eval, through_generic);
+    }
+
+    #[test]
+    fn eval_top_level_huber_loss_2d_f64_matches_generic_and_preserves_edges() {
+        let rows = 9usize;
+        let cols = 7usize;
+        let a_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.23).sin() * 2.75 - 0.75)
+            .collect();
+        let b_data: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx as f64) * 0.41).cos() * 1.75 + 0.25)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let a = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_data).expect("a input"),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, b_data).expect("b input"),
+        );
+        let jaxpr = make_huber_loss_2d_jaxpr();
+
+        let fast = eval_jaxpr(&jaxpr, &[a.clone(), b.clone()]).expect("fast huber");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &[a, b]).expect("generic huber");
+        assert_eq!(fast, generic);
+
+        let mut a_nonfinite: Vec<f64> = (0..rows * cols).map(|idx| idx as f64 * 0.01).collect();
+        a_nonfinite[cols + 1] = f64::NAN;
+        let a_nf = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, a_nonfinite)
+                .expect("nonfinite a"),
+        );
+        let b_ok = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims },
+                (0..rows * cols).map(|idx| idx as f64 * 0.02).collect(),
+            )
+            .expect("finite b"),
+        );
+        let through_eval = eval_jaxpr(&jaxpr, &[a_nf.clone(), b_ok.clone()])
+            .expect("nonfinite huber falls through");
+        let through_generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &[a_nf, b_ok]).expect("generic nonfinite huber");
         assert_eq!(through_eval, through_generic);
     }
 
