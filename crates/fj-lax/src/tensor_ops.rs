@@ -3208,7 +3208,11 @@ pub(crate) fn eval_slice(
                 // of the single source sub-range (serial `.to_vec()` is page-fault-bound at
                 // ~3.5 GB/s). Bit-identical (pure copy). `concat_contiguous_into` with one
                 // source is exactly a parallel memcpy. Reused across the dense dtype arms.
-                let par = total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+                let force_serial_contiguous_copy = params
+                    .get("__fj_slice_contig_legacy")
+                    .is_some_and(|value| value == "1");
+                let par = !force_serial_contiguous_copy
+                    && total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
                     && crate::arithmetic::work_scaled_threads(total) > 1;
                 let threads = crate::arithmetic::work_scaled_threads(total);
                 if let Some(src) = tensor.elements.as_f64_slice() {
@@ -3266,32 +3270,55 @@ pub(crate) fn eval_slice(
                     return Ok(Value::Tensor(tv?));
                 }
                 if let Some(src) = tensor.elements.as_u32_slice() {
-                    return Ok(Value::Tensor(TensorValue::new_u32_values(
-                        shape,
-                        src[start_offset..end_offset].to_vec(),
-                    )?));
+                    let sub = &src[start_offset..end_offset];
+                    let vals = if par {
+                        let mut out = vec![0u32; total];
+                        concat_contiguous_into(&mut out, &[sub], threads);
+                        out
+                    } else {
+                        sub.to_vec()
+                    };
+                    return Ok(Value::Tensor(TensorValue::new_u32_values(shape, vals)?));
                 }
                 if let Some(src) = tensor.elements.as_u64_slice() {
-                    return Ok(Value::Tensor(TensorValue::new_u64_values(
-                        shape,
-                        src[start_offset..end_offset].to_vec(),
-                    )?));
+                    let sub = &src[start_offset..end_offset];
+                    let vals = if par {
+                        let mut out = vec![0u64; total];
+                        concat_contiguous_into(&mut out, &[sub], threads);
+                        out
+                    } else {
+                        sub.to_vec()
+                    };
+                    return Ok(Value::Tensor(TensorValue::new_u64_values(shape, vals)?));
                 }
                 // Bool mask slice (cropping a mask) — copy the contiguous bool
                 // sub-range into dense storage instead of boxing each element.
                 if let Some(src) = tensor.elements.as_bool_slice() {
-                    return Ok(Value::Tensor(TensorValue::new_bool_values(
-                        shape,
-                        src[start_offset..end_offset].to_vec(),
-                    )?));
+                    let sub = &src[start_offset..end_offset];
+                    let vals = if par {
+                        let mut out = vec![false; total];
+                        concat_contiguous_into(&mut out, &[sub], threads);
+                        out
+                    } else {
+                        sub.to_vec()
+                    };
+                    return Ok(Value::Tensor(TensorValue::new_bool_values(shape, vals)?));
                 }
                 // Complex slice (windowing a spectrum in an FFT/signal pipeline) —
                 // copy the contiguous (re,im) sub-range into dense complex storage.
                 if let Some(src) = tensor.elements.as_complex_slice() {
+                    let sub = &src[start_offset..end_offset];
+                    let vals = if par {
+                        let mut out = vec![(0.0f64, 0.0f64); total];
+                        concat_contiguous_into(&mut out, &[sub], threads);
+                        out
+                    } else {
+                        sub.to_vec()
+                    };
                     return Ok(Value::Tensor(TensorValue::new_complex_values(
                         tensor.dtype,
                         shape,
-                        src[start_offset..end_offset].to_vec(),
+                        vals,
                     )?));
                 }
                 return Ok(Value::Tensor(TensorValue::new(

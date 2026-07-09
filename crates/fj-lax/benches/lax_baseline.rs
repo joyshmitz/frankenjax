@@ -8244,6 +8244,34 @@ fn bench_dynamic_update_slice_64_rows_16_cols(c: &mut Criterion) {
     });
 }
 
+// Large contiguous Complex128 slice: this isolates the dense packed `(re, im)`
+// copy branch used by spectrum/windowing pipelines.
+fn bench_slice_contig_complex128_4096x4096(c: &mut Criterion) {
+    let rows = 4096usize;
+    let cols = 4096usize;
+    let input = complex_matrix_dense(rows, cols);
+    let mut params = BTreeMap::new();
+    params.insert("start_indices".into(), "0,0".into());
+    params.insert("limit_indices".into(), format!("{},{}", rows / 2, cols));
+    let mut legacy_params = params.clone();
+    legacy_params.insert("__fj_slice_contig_legacy".into(), "1".into());
+    c.bench_function(
+        "eval/slice_contig_complex128_4096x4096_half_legacy",
+        |bencher| {
+            bencher.iter(|| {
+                eval_primitive(
+                    Primitive::Slice,
+                    std::slice::from_ref(&input),
+                    &legacy_params,
+                )
+            })
+        },
+    );
+    c.bench_function("eval/slice_contig_complex128_4096x4096_half", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Slice, std::slice::from_ref(&input), &params))
+    });
+}
+
 fn bench_eq_1k(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let lhs = Value::vector_i64(&data).unwrap();
@@ -8939,6 +8967,7 @@ criterion_group!(
     bench_slice_64_rows_16_cols,
     bench_dynamic_slice_64_rows_16_cols,
     bench_dynamic_update_slice_64_rows_16_cols,
+    bench_slice_contig_complex128_4096x4096,
     bench_eq_1k,
     bench_bitwise_and_1k,
 );

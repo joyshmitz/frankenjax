@@ -2,6 +2,55 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 2.13x vs ORIG: dtype-complete threaded contiguous Slice copy (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided
+  the rejected dense complex replicated-broadcast fill route, Poisson
+  convergence/table, producerless reducer, branchless select, gather/scatter
+  SIMD, FFT/radix, Cholesky/GEMM, cumsum-family reruns, row-wise interpreter
+  superinstructions, and special-function sibling lanes. Profile target was the
+  remaining dense contiguous `Slice` copy path for packed Complex128 tensors:
+  `[4096,4096] -> [2048,4096]` with `start_indices=0,0`. The pre-existing f64,
+  f32, half, and i64 arms already used `concat_contiguous_into`, while u32,
+  u64, bool, and complex still fell back to serial `to_vec()`.
+- LEVER: treat the contiguous slice as a structural data-movement primitive over
+  one packed source interval, not as dtype-specific scalar work. The u32, u64,
+  bool, and complex dense contiguous arms now share the existing gated threaded
+  copy path. A private `__fj_slice_contig_legacy` benchmark parameter preserves
+  the old serial route in the same binary for byte-exact ratio-vs-ORIG
+  measurement only; normal execution uses the threaded path.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-lax --profile release --bench lax_baseline
+  'eval/slice_contig_complex128_4096x4096_half(_legacy)?$' -- --warm-up-time 1
+  --measurement-time 2 --sample-size 10 --noplot`). ORIG and candidate are
+  same-worker, same-binary rows on `vmi1227854`.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG serial `eval/slice_contig_complex128_4096x4096_half_legacy` | `vmi1227854` | 57.500 ms | 56.241-59.956 ms |
+  | candidate threaded `eval/slice_contig_complex128_4096x4096_half` | `vmi1227854` | 26.998 ms | 25.205-30.225 ms |
+
+  Ratio vs ORIG: **0.470x time / 2.13x faster** by midpoint. A pre-change
+  production serial row on `ovh-a` measured 67.149 ms, consistent with the
+  same-worker legacy comparator but not used for the ratio.
+- VALIDATION: targeted slice parity GREEN with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-lax --profile release slice --lib -- --nocapture` on `hz2` (53 passed,
+  8 ignored). Byte-exact conformance GREEN with `AGENT_NAME=BlackThrush
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod rch exec -- cargo test
+  -p fj-conformance --profile release -- --nocapture` (RCH fail-open local; all
+  tests and doc-tests passed). `cargo fmt -p fj-lax -- --check`,
+  `git diff --check -- crates/fj-lax/src/tensor_ops.rs
+  crates/fj-lax/benches/lax_baseline.rs`, and `rch exec -- cargo check -p
+  fj-lax --all-targets` were GREEN; `fj-lax` check still reports pre-existing
+  unrelated warnings in `reduction.rs` and `linalg.rs`. Broad `cargo clippy -p
+  fj-lax --all-targets -- -D warnings` remains blocked by pre-existing unrelated
+  lint debt outside this slice lever and was not broadened into this change. UBS
+  over the owned source files was non-zero on broad pre-existing
+  panic/security/indexing heuristics; its embedded formatting, clippy,
+  cargo-check, and test-build subchecks were clean.
+
 ## 2026-07-09 - NO-SHIP 0.998x vs ORIG: dense complex replicated-broadcast fill route (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-lax`. Consulted this ledger first and avoided the
