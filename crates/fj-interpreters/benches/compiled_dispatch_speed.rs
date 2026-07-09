@@ -5153,6 +5153,19 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
             &args,
         );
     }
+    for &(rows, cols) in &[(4096usize, 1024usize), (16384, 1024)] {
+        let arg: Vec<f32> = (0..cols).map(|idx| idx as f32 * 0.001 + 1.0).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f32_values(Shape::vector(cols as u32), arg).expect("broadcast vector"),
+        )];
+        let jaxpr = build_broadcast_reciprocal_jaxpr(rows, cols);
+        bench_donation_one(
+            &mut group,
+            &format!("donate_broadcast_reciprocal_f32_{rows}x{cols}"),
+            &jaxpr,
+            &args,
+        );
+    }
     group.finish();
 }
 

@@ -2,6 +2,58 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-09 - WIN 1.44x vs ORIG: DRAM-scale dense-f32 reciprocal donation (BlackThrush)
+
+- Agent: BlackThrush. Crate: `fj-interpreters`. Consulted this ledger first
+  and avoided the closed/rejected `fj-lax` maxpool, softmax/log-softmax,
+  cumsum/AD chain-cumsum, dense f64 serde, Scan SIMD, Slice copy, Poisson,
+  special-function, BF16, one-hot, FFT, sort, SVD, row-wise interpreter,
+  gather/scatter, branchless select, large-vector direct f64 tensor-add DAG,
+  and dynamic-tape element-major fusion lanes. A fresh profile rerun confirmed
+  that dynamic-tape element-major fusion remains a rejection: `eval_fusion_speed`
+  showed step-major beating element-major on `FUSION_DYNAMIC_PROBE`
+  (`5.212 ms` vs `19.520 ms` at 1,048,576 elements, `203.925 ms` vs
+  `364.255 ms` at 16,777,216 elements). The unmined hot primitive was the
+  existing owned-buffer donation vein for f32 `Reciprocal`, which still cloned
+  and allocated after a dense f32 broadcast producer.
+- LEVER: extend liveness-gated owned-buffer donation from dense f64 to dense
+  f32 for `Reciprocal` only. When a dense f32 tensor is an interpreter
+  intermediate whose last use is the current reciprocal equation, and the
+  backing buffer is uniquely owned, take the `Vec<f32>`, apply the exact
+  f32 widen-to-f64 reciprocal contract in place, and rewrap it. The path is
+  gated to `n >= FUSION_THREAD_MIN_ELEMS` after a 4M probe showed the old path
+  already wins there; below the gate, and for non-f32, non-unique, literal,
+  parameterized, returned/external, or non-`Reciprocal` inputs, execution falls
+  through to the old clone/allocate path. `DENSE_F64_DONATION_DISABLE` remains
+  the same-binary A/B switch for donation.
+- MEASURED per-crate with the requested wrapper (`AGENT_NAME=BlackThrush`,
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod`, `rch exec -- cargo
+  bench -p fj-interpreters --profile release --bench compiled_dispatch_speed
+  donate_broadcast_reciprocal_f32 -- --warm-up-time 1 --measurement-time 2
+  --sample-size 10 --noplot`). ORIG and candidate are same-worker,
+  same-binary rows on `ovh-a`.
+
+  | row | worker | midpoint | CI |
+  | --- | --- | ---: | ---: |
+  | ORIG `compiled_dispatch/original_no_donation/donate_broadcast_reciprocal_f32_16384x1024` | `ovh-a` | 20.673 ms | 20.304-21.065 ms |
+  | candidate `compiled_dispatch/donated/donate_broadcast_reciprocal_f32_16384x1024` | `ovh-a` | 14.383 ms | 14.142-14.593 ms |
+
+  Ratio vs ORIG: **0.696x time / 1.44x faster** by midpoint; conservative
+  CI floor is `20.304 / 14.593 = 1.39x`. The guard row
+  `4096x1024` remained effectively old-path/neutral after gating (`1.9628 ms`
+  ORIG vs `2.0066 ms` candidate midpoint), so the new donation primitive only
+  fires on the measured DRAM-scale row.
+- VALIDATION: focused donation tests GREEN with the requested wrapper on
+  `ovh-a`: `cargo test -p fj-interpreters --profile release eval_donated --lib
+  -- --nocapture` (2 passed, including f32 bit-exact broadcast reciprocal).
+  The requested RCH conformance command reached tests but failed on worker
+  `vmi1152480` because `.rchignore` omitted tracked `artifacts/phase2c/...`
+  files required by `artifact_schemas`; the local fallback with the same
+  scratch worktree and target dir was byte-exact GREEN:
+  `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/jax-cod
+  cargo test -p fj-conformance --profile release -- --nocapture` (all tests
+  and doc-tests passed).
+
 ## 2026-07-09 - WIN 1.38x vs ORIG: allocation-thinned scalar binary trace path (BlackThrush)
 
 - Agent: BlackThrush. Crate: `fj-trace`.

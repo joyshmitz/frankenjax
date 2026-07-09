@@ -6710,7 +6710,7 @@ const FUSION_ELEMS_PER_THREAD: usize = 1 << 18; // 256 Ki / worker
 pub static FUSION_THREAD_CAP_OVERRIDE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Benchmark-only A/B knob for the dense-f64 donation path. Default 0 enables
+/// Benchmark-only A/B knob for the dense donation path. Default 0 enables
 /// production donation; nonzero forces the old clone-then-allocate unary path.
 pub static DENSE_F64_DONATION_DISABLE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -7074,6 +7074,23 @@ fn apply_inplace_f64_unary_chunk(out: &mut [f64], op: InplaceF64Unary) {
         InplaceF64Unary::Cheap(op) => apply_f64_unary_chunk(out, op),
         InplaceF64Unary::Reciprocal => out.iter_mut().for_each(|o| *o = 1.0 / *o),
     }
+}
+
+fn inplace_f32_unary(
+    primitive: Primitive,
+    params: &std::collections::BTreeMap<String, String>,
+) -> Option<ScalarF64BinaryOp> {
+    if primitive == Primitive::Reciprocal && params.is_empty() {
+        Some(ScalarF64BinaryOp::Reciprocal)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn apply_inplace_f32_unary_chunk(out: &mut [f32], op: ScalarF64BinaryOp) {
+    out.iter_mut()
+        .for_each(|o| *o = apply_scalar_f32_binary(op, *o, *o));
 }
 
 /// Evaluate the fused run over one chunk `out` (already sized to the chunk length).
@@ -14671,6 +14688,90 @@ fn try_eval_donated_dense_f64_unary(
     Some(Ok(()))
 }
 
+fn try_eval_donated_dense_f32_unary(
+    eqn: &Equation,
+    eqn_index: usize,
+    env: &mut [Option<Value>],
+    last_use: &[usize],
+) -> Option<Result<(), InterpreterError>> {
+    if DENSE_F64_DONATION_DISABLE.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        return None;
+    }
+    if !eqn.sub_jaxprs.is_empty()
+        || !eqn.effects.is_empty()
+        || eqn.inputs.len() != 1
+        || eqn.outputs.len() != 1
+        || is_multi_output_primitive(eqn.primitive)
+    {
+        return None;
+    }
+    let op = inplace_f32_unary(eqn.primitive, &eqn.params)?;
+    let Atom::Var(input_var) = eqn.inputs[0] else {
+        return None;
+    };
+    let input_slot = input_var.0 as usize;
+    let out_slot = eqn.outputs[0].0 as usize;
+    if input_slot >= env.len() {
+        return Some(Err(InterpreterError::MissingVariable(input_var)));
+    }
+    if out_slot >= env.len() {
+        return Some(Err(InterpreterError::MissingVariable(eqn.outputs[0])));
+    }
+    if last_use.get(input_slot).copied() != Some(eqn_index) {
+        return None;
+    }
+
+    let Some(value) = env[input_slot].take() else {
+        return Some(Err(InterpreterError::MissingVariable(input_var)));
+    };
+    let Value::Tensor(tensor) = value else {
+        env[input_slot] = Some(value);
+        return None;
+    };
+    if tensor.dtype != DType::F32 {
+        env[input_slot] = Some(Value::Tensor(tensor));
+        return None;
+    }
+
+    let TensorValue {
+        dtype,
+        shape,
+        elements,
+    } = tensor;
+    if elements.len() < FUSION_THREAD_MIN_ELEMS {
+        env[input_slot] = Some(Value::Tensor(TensorValue {
+            dtype,
+            shape,
+            elements,
+        }));
+        return None;
+    }
+    let mut values = match elements.try_into_f32_values() {
+        Ok(values) => values,
+        Err(elements) => {
+            env[input_slot] = Some(Value::Tensor(TensorValue {
+                dtype,
+                shape,
+                elements,
+            }));
+            return None;
+        }
+    };
+    drive_fusion_chunks(&mut values, |chunk, _base| {
+        apply_inplace_f32_unary_chunk(chunk, op);
+    });
+    let output = match TensorValue::new_f32_values(shape, values) {
+        Ok(tensor) => Value::Tensor(tensor),
+        Err(err) => {
+            return Some(Err(InterpreterError::Primitive(EvalError::InvalidTensor(
+                err,
+            ))));
+        }
+    };
+    env[out_slot] = Some(output);
+    Some(Ok(()))
+}
+
 /// [`run_dense_env`] writing its `outvars` into a caller-owned `out` buffer and
 /// resolving inputs through a caller-owned `scratch` buffer, so a loop re-running
 /// the same sub-jaxpr reuses BOTH allocations instead of a fresh `Vec` per call.
@@ -14727,6 +14828,11 @@ fn run_dense_env_into(
 
         let eqn = &jaxpr.equations[i];
         if let Some(result) = try_eval_donated_dense_f64_unary(eqn, i, env, last_use) {
+            result?;
+            i += 1;
+            continue;
+        }
+        if let Some(result) = try_eval_donated_dense_f32_unary(eqn, i, env, last_use) {
             result?;
             i += 1;
             continue;
@@ -14943,6 +15049,98 @@ mod tests {
             }
             _ => panic!("expected tensor"),
         }
+    }
+
+    fn sampled_f32_bits(v: &Value, indices: &[usize]) -> Vec<u32> {
+        match v {
+            Value::Tensor(t) => {
+                if let Some(values) = t.elements.as_f32_slice() {
+                    return indices
+                        .iter()
+                        .map(|&index| values[index].to_bits())
+                        .collect();
+                }
+                indices
+                    .iter()
+                    .map(|&index| match t.elements[index] {
+                        Literal::F32Bits(bits) => bits,
+                        ref other => panic!("expected f32 tensor element, got {other:?}"),
+                    })
+                    .collect()
+            }
+            _ => panic!("expected tensor"),
+        }
+    }
+
+    #[test]
+    fn eval_donated_f32_broadcast_reciprocal_matches_generic() {
+        let x = VarId(0);
+        let bcast = VarId(1);
+        let out = VarId(2);
+        let cols = 1024usize;
+        let rows = super::FUSION_THREAD_MIN_ELEMS / cols + 1;
+        let n = rows * cols;
+        let mut broadcast_params = BTreeMap::new();
+        broadcast_params.insert("shape".to_owned(), format!("{rows},{cols}"));
+        broadcast_params.insert("broadcast_dimensions".to_owned(), "1".to_owned());
+        let jaxpr = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::BroadcastInDim,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![bcast],
+                    params: broadcast_params,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Reciprocal,
+                    inputs: smallvec![Atom::Var(bcast)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let arg_values: Vec<f32> = (0..cols)
+            .map(|i| match i % 4 {
+                0 => 1.0,
+                1 => -2.0,
+                2 => f32::INFINITY,
+                _ => -0.0,
+            })
+            .collect();
+        let arg = f32_tensor_values(vec![cols as u32], arg_values.clone());
+        let planned = eval_jaxpr(&jaxpr, std::slice::from_ref(&arg)).expect("planned");
+        let generic =
+            eval_jaxpr_hashed_env(&jaxpr, &[], std::slice::from_ref(&arg)).expect("generic");
+
+        let samples = [0, 1, 2, 3, cols + 5, n / 2 + 17, n - cols + 2, n - 1];
+        let got = sampled_f32_bits(&planned[0], &samples);
+        assert_eq!(got, sampled_f32_bits(&generic[0], &samples));
+        let want: Vec<u32> = samples
+            .iter()
+            .map(|&index| {
+                let value = arg_values[index % cols];
+                super::apply_scalar_f32_binary(super::ScalarF64BinaryOp::Reciprocal, value, value)
+                    .to_bits()
+            })
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(
+            sampled_f32_bits(&arg, &[0, 1, 2, 3, cols - 1]),
+            vec![
+                0x3f80_0000,
+                0xc000_0000,
+                0x7f80_0000,
+                0x8000_0000,
+                0x8000_0000,
+            ]
+        );
     }
 
     /// Canonicalize NaN lanes to one fixed bit pattern before a bit-exact f32
